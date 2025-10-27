@@ -1,0 +1,27 @@
+# Core Django
+Django>=5.0,<6.0
+
+# REST framework
+djangorestframework>=3.15.0
+
+# JWT Authentication
+djangorestframework-simplejwt>=5.3.1
+
+# CORS headers (for connecting React frontend)
+django-cors-headers>=4.4.0
+
+# PostgreSQL database adapter (if you’ll use Postgres later)
+psycopg2-binary>=2.9.9
+
+# Gunicorn for production WSGI server
+gunicorn>=21.2.0
+
+# Environment variable loader
+python-dotenv>=1.0.1
+
+# Pillow for image handling
+Pillow>=10.3.0
+
+# Google / Social Authentication
+social-auth-app-django>=5.4.0
+social-auth-core>=4.5.0
