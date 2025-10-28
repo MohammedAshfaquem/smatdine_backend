@@ -8,7 +8,10 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from .serializers import StaffRegisterSerializer, StaffLoginSerializer
-
+from django.contrib.auth import get_user_model
+from rest_framework.permissions import IsAuthenticated
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_exempt
 
 
 
@@ -112,4 +115,53 @@ class PasswordResetConfirmView(APIView):
             return Response({"message": "Password reset successful."}, status=200)
 
         return Response({"error": "Invalid or expired token."}, status=400)
+    
+ 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_pending_users(request):
+    if request.user.role != "admin":
+        return Response({"error": "Only admins can view pending users."}, status=403)
 
+    pending_users = User.objects.filter(is_email_verified=True, is_approved_by_admin=False)
+    data = [
+        {
+            "id": u.id,
+            "name": u.name,
+            "email": u.email,
+            "role": u.role,
+            "is_email_verified": u.is_email_verified,
+            "is_approved_by_admin": u.is_approved_by_admin,
+        }
+        for u in pending_users
+    ]
+    return Response(data, status=200)
+
+@method_decorator(csrf_exempt, name='dispatch')
+class ApproveUserView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if request.user.role != "admin":
+            return Response({"detail": "Only admins can approve users."}, status=status.HTTP_403_FORBIDDEN)
+
+        user = get_object_or_404(User, pk=pk)
+        if user.is_approved_by_admin:
+            return Response({"detail": "User is already approved."}, status=status.HTTP_200_OK)
+
+        user.is_approved_by_admin = True
+        user.save()
+        return Response({"detail": f"{user.name} approved successfully!"}, status=status.HTTP_200_OK)
+    
+    
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def pending_requests_count(request):
+    """
+    Return the number of pending user requests (excluding superusers)
+    """
+    count = User.objects.filter(
+        is_approved_by_admin=False,
+        is_superuser=False
+    ).count()
+    return Response({"pending_count": count})
