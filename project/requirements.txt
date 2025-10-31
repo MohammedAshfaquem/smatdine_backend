@@ -22,4 +22,7 @@ python-dotenv>=1.0.1
 # Pillow for image handling
 Pillow>=10.3.0
 
+qrcode[pil]
+
+
 
