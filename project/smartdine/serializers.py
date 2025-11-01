@@ -10,21 +10,27 @@ User = get_user_model()
 
 class StaffRegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, min_length=6)
+    confirm_password = serializers.CharField(write_only=True, min_length=6)
 
     class Meta:
         model = User
-        fields = ['name', 'email', 'password', 'role']
+        fields = ['name', 'email', 'password', 'confirm_password', 'role']
+
+    def validate(self, data):
+        if data['password'] != data['confirm_password']:
+            raise serializers.ValidationError({"confirm_password": "Passwords do not match."})
+        return data
 
     def validate_role(self, value):
-        allowed_roles = ['kitchen', 'waiter'] 
+        allowed_roles = ['kitchen', 'waiter']
         if value not in allowed_roles:
             raise serializers.ValidationError(f"Role must be one of {allowed_roles}.")
         return value
 
     def create(self, validated_data):
+        validated_data.pop('confirm_password')
         validated_data['password'] = make_password(validated_data['password'])
-        user = super().create(validated_data)
-        return user
+        return super().create(validated_data)
 
 
 

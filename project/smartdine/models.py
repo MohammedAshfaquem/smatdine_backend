@@ -6,6 +6,9 @@ import uuid
 import qrcode
 from io import BytesIO
 from django.core.files import File
+from datetime import timedelta
+from django.utils import timezone
+
 
 
 
@@ -48,12 +51,16 @@ class User(AbstractBaseUser, PermissionsMixin):
     name = models.CharField(max_length=100)
     email = models.EmailField(unique=True)
     role = models.CharField(max_length=20, choices=ROLE_CHOICES)
-    is_active = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=False)
     is_staff = models.BooleanField(default=False)
     is_blocked = models.BooleanField(default=False)
     is_email_verified = models.BooleanField(default=False)
     is_approved_by_admin = models.BooleanField(default=False)
     email_verification_token = models.UUIDField(default=uuid.uuid4, editable=False)
+
+    # 🔐 Password reset fields
+    password_reset_token = models.UUIDField(null=True, blank=True)
+    password_reset_sent_at = models.DateTimeField(null=True, blank=True)
 
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['name']
@@ -62,6 +69,28 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return f"{self.name} ({self.email})"
+
+    # ✅ Create password reset token
+    def create_reset_token(self):
+        self.password_reset_token = uuid.uuid4()
+        self.password_reset_sent_at = timezone.now()
+        self.save(update_fields=["password_reset_token", "password_reset_sent_at"])
+        return self.password_reset_token
+
+    # ✅ Validate token (10 min expiry)
+    def is_reset_token_valid(self, token, expiry_minutes=10):
+        if not self.password_reset_token or not self.password_reset_sent_at:
+            return False
+        if str(self.password_reset_token) != str(token):
+            return False
+        expiry_time = self.password_reset_sent_at + timedelta(minutes=expiry_minutes)
+        return timezone.now() <= expiry_time
+
+    # ✅ Clear after successful reset
+    def clear_reset_token(self):
+        self.password_reset_token = None
+        self.password_reset_sent_at = None
+        self.save(update_fields=["password_reset_token", "password_reset_sent_at"])
 
 
 

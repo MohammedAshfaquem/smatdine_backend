@@ -12,7 +12,7 @@ from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 from .utils import send_verification_email
 from .models import Table
-from django.http import JsonResponse, Http404
+from django.conf import settings
 
 
 
@@ -35,20 +35,25 @@ class StaffRegisterView(APIView):
 
 
 
+
 class VerifyStaffEmailView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request, token):
+        print(f"📩 Received token: {token}")
 
         try:
             user = get_object_or_404(User, email_verification_token=token)
+            print(f"✅ Found user: {user.email}")
+
             if user.is_email_verified:
                 return Response({"message": "Email already verified!"})
             user.is_email_verified = True
             user.is_active = True
             user.save()
             return Response({"message": "Email verified successfully!"})
-        except Exception:
+        except Exception as e:
+            print(f"❌ Verification error: {e}")
             return Response({"message": "Invalid or expired token."}, status=400)
 
 
@@ -72,28 +77,13 @@ class StaffLoginView(APIView):
         return Response(data, status=200)
 
 
-class RequestPasswordResetView(APIView):
-    permission_classes = [AllowAny]
-    def post(self, request):
-        email = request.data.get('email')
-        if not email:
-            return Response({"error": "Email is required"}, status=400)
-        try:
-            user = User.objects.get(email=email)
-            token = default_token_generator.make_token(user)
-            reset_url = f"http://localhost:3001/reset-password/{user.id}/{token}"
-            send_mail("Password Reset Request", f"Click here: {reset_url}", from_email=None, recipient_list=[user.email])
-            return Response({"message": "Password reset link sent to email."}, status=200)
-        except User.DoesNotExist:
-            return Response({"error": "User does not exist."}, status=404)
-        
 
 class PasswordResetConfirmView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request, user_id, token):
-        password = request.data.get('password')
-        confirm_password = request.data.get('confirm_password')
+        password = request.data.get("password")
+        confirm_password = request.data.get("confirm_password")
 
         if not password or not confirm_password:
             return Response({"error": "Both password fields are required."}, status=400)
@@ -103,13 +93,69 @@ class PasswordResetConfirmView(APIView):
 
         user = get_object_or_404(User, id=user_id)
 
-        if default_token_generator.check_token(user, token):
-            user.set_password(password)
-            user.save()
-            return Response({"message": "Password reset successful."}, status=200)
+        # ✅ Check if token is valid first
+        if not user.is_reset_token_valid(token):
+            return Response({"error": "Invalid or expired token."}, status=400)
 
-        return Response({"error": "Invalid or expired token."}, status=400)
-    
+        # ✅ Reset password and clear token (so link can’t be reused)
+        user.set_password(password)
+        user.clear_reset_token()
+        user.save()
+
+        return Response({"message": "Password reset successful."}, status=200)
+
+
+class RequestPasswordResetView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        email = request.data.get("email")
+        if not email:
+            return Response({"error": "Email is required."}, status=400)
+
+        try:
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            return Response({"error": "User does not exist."}, status=404)
+
+        # ✅ Clear any existing token before creating a new one
+        user.clear_reset_token()
+
+        token = user.create_reset_token()
+        reset_link = f"{settings.FRONTEND_URL}/reset-password/{user.id}/{token}/"
+
+        subject = "SmartDine - Password Reset Request"
+        message = f"Click this link to reset your password: {reset_link}"
+        html_message = f"""
+            <p>Hello {user.name},</p>
+            <p>Click <a href="{reset_link}">here</a> to reset your password.</p>
+            <p>This link expires in 10 minutes and can only be used once.</p>
+            <p>– SmartDine Team</p>
+        """
+
+        send_mail(
+            subject,
+            message,
+            settings.DEFAULT_FROM_EMAIL,
+            [user.email],
+            html_message=html_message,
+        )
+
+        return Response({"message": "Password reset link sent to your email."}, status=200)
+
+
+
+class ValidateResetTokenView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request, user_id, token):
+        user = get_object_or_404(User, id=user_id)
+
+        if not user.is_reset_token_valid(token):
+            return Response({"valid": False}, status=400)
+
+        return Response({"valid": True}, status=200)
+
 
 class PendingUsersView(APIView):
     permission_classes = [IsAuthenticated]

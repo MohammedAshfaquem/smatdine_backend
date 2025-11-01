@@ -10,7 +10,7 @@ djangorestframework-simplejwt>=5.3.1
 # CORS headers (for connecting React frontend)
 django-cors-headers>=4.4.0
 
-# PostgreSQL database adapter (if you’ll use Postgres later)
+# PostgreSQL database adapter
 psycopg2-binary>=2.9.9
 
 # Gunicorn for production WSGI server
@@ -19,10 +19,11 @@ gunicorn>=21.2.0
 # Environment variable loader
 python-dotenv>=1.0.1
 
+# Database URL parser (needed for DATABASE_URL in settings)
+dj-database-url>=2.2.0
+
 # Pillow for image handling
 Pillow>=10.3.0
 
+# QR code generation
 qrcode[pil]
-
-
-
