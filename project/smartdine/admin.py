@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django.utils.html import format_html
 from .models import (
     User,
     Table,
@@ -9,21 +10,23 @@ from .models import (
     OrderItem,
     WaiterRequest,
     Feedback,
+    Ingredient,
+    Base,CustomDish,CustomDishIngredient,
 )
-from django.utils.html import format_html
-
 
 
 @admin.register(User)
 class UserAdmin(admin.ModelAdmin):
-    list_display = ("id", "name", "email", "role", "is_active", "is_blocked", "is_email_verified", "is_approved_by_admin")
-    list_filter = ("role", "is_active", "is_blocked", "is_email_verified", "is_approved_by_admin")
+    list_display = (
+        "id", "name", "email", "role", "is_active",
+        "is_blocked", "is_email_verified", "is_approved_by_admin"
+    )
+    list_filter = (
+        "role", "is_active", "is_blocked",
+        "is_email_verified", "is_approved_by_admin"
+    )
     search_fields = ("name", "email")
     ordering = ("id",)
-
-
-
-
 
 
 @admin.register(MenuItem)
@@ -61,12 +64,6 @@ class WaiterRequestAdmin(admin.ModelAdmin):
     list_filter = ("type", "status")
 
 
-@admin.register(Feedback)
-class FeedbackAdmin(admin.ModelAdmin):
-    list_display = ("id", "table", "order", "rating", "comment", "created_at", "updated_at")
-    list_filter = ("rating",)
-
-
 @admin.register(Table)
 class TableAdmin(admin.ModelAdmin):
     list_display = ('id', 'table_number', 'seats', 'status', 'qr_code_preview', 'created_at', 'updated_at')
@@ -82,3 +79,42 @@ class TableAdmin(admin.ModelAdmin):
         return "No QR Code"
 
     qr_code_preview.short_description = "QR Code"
+
+
+# ✅ Only one FeedbackAdmin (clean + updated)
+@admin.register(Feedback)
+class FeedbackAdmin(admin.ModelAdmin):
+    list_display = ('id', 'order', 'food_rating', 'service_rating', 'comments', 'created_at')
+    list_filter = ('food_rating', 'service_rating', 'created_at')
+    search_fields = ('order__id', 'comments')
+    ordering = ('-created_at',)
+    
+@admin.register(Base)
+class BaseAdmin(admin.ModelAdmin):
+    list_display = ('name', 'price')
+    search_fields = ('name',)
+
+@admin.register(Ingredient)
+class IngredientAdmin(admin.ModelAdmin):
+    list_display = ('name', 'category', 'price')
+    list_filter = ('category',)
+    search_fields = ('name',)
+
+class CustomDishIngredientInline(admin.TabularInline):
+    model = CustomDishIngredient
+    extra = 1
+
+@admin.register(CustomDish)
+class CustomDishAdmin(admin.ModelAdmin):
+    list_display = ['id', 'name', 'base', 'get_ingredients', 'total_price', 'created_at']
+
+    def get_ingredients(self, obj):
+        return ", ".join([i.ingredient.name for i in obj.dish_ingredients.all()])
+    get_ingredients.short_description = "Ingredients"
+
+
+
+@admin.register(CustomDishIngredient)
+class CustomDishIngredientAdmin(admin.ModelAdmin):
+    list_display = ('custom_dish', 'ingredient', 'quantity')
+
