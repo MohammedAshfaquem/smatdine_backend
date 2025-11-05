@@ -345,6 +345,7 @@ class CustomDish(models.Model):
     special_notes = models.TextField(blank=True, null=True)
     preparation_time = models.PositiveIntegerField(default=0, help_text="Time in minutes")  # ✅ added
     created_at = models.DateTimeField(auto_now_add=True)
+    sold_count = models.PositiveIntegerField(default=0)
 
     def calculate_total(self):
         """Calculate total = base price + all ingredients"""

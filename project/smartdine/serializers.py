@@ -134,6 +134,7 @@ class CustomDishSerializer(serializers.ModelSerializer):
             "dish_ingredients",  # read-only representation
             "special_notes",
             "total_price",
+            "sold_count", 
             "preparation_time",  # ✅ new field
             "created_at",
         ]
@@ -143,6 +144,7 @@ class CustomDishSerializer(serializers.ModelSerializer):
             "dish_ingredients",
             "base",
             "preparation_time",  # ✅ keep read-only
+            "sold_count", 
         ]
 
         

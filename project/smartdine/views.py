@@ -1048,16 +1048,36 @@ class CustomDishListByTableView(APIView):
 
 
 class CustomDishListAllView(APIView):
-    permission_classes = [permissions.IsAuthenticated]  # admin/waiter
+    permission_classes = [permissions.AllowAny]  # allow all to view
 
     def get(self, request):
+        user = request.user if request.user.is_authenticated else None
+        show_all = request.query_params.get("all") == "true"
+
         dishes = (
             CustomDish.objects.select_related("table", "base")
             .prefetch_related("dish_ingredients__ingredient")
-            .order_by("-created_at")
+            .order_by("-sold_count", "-created_at")
         )
+
+        # 🧠 Customers (unauthenticated or role=customer)
+        if (not user or getattr(user, "role", None) == "customer") and not show_all:
+            top_dishes = dishes[:3]
+            serializer = CustomDishSerializer(top_dishes, many=True)
+            return Response({
+                "message": "Top 3 most popular custom dishes",
+                "show_all": False,
+                "data": serializer.data,
+            }, status=status.HTTP_200_OK)
+
+        # 👨‍🍳 Admin/Waiter (or ?all=true)
         serializer = CustomDishSerializer(dishes, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response({
+            "message": "All custom dishes",
+            "show_all": True,
+            "data": serializer.data,
+        }, status=status.HTTP_200_OK)
+
 
 
 
