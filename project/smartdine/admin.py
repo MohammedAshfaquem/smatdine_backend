@@ -31,9 +31,26 @@ class UserAdmin(admin.ModelAdmin):
 
 @admin.register(MenuItem)
 class MenuItemAdmin(admin.ModelAdmin):
-    list_display = ("id", "name", "category", "price", "availability", "created_at", "updated_at")
-    list_filter = ("category", "availability")
+    list_display = (
+        "id",
+        "name",
+        "category",
+        "type",
+        "price",
+        "stock",      
+        "availability",
+        "preparation_time",
+        "created_at",
+        "updated_at",
+    )
+    list_filter = (
+        "category",
+        "type",
+        "availability",
+    )
     search_fields = ("name",)
+    list_editable = ("price", "stock", "availability")
+
 
 
 @admin.register(Cart)
@@ -80,8 +97,6 @@ class TableAdmin(admin.ModelAdmin):
 
     qr_code_preview.short_description = "QR Code"
 
-
-# ✅ Only one FeedbackAdmin (clean + updated)
 @admin.register(Feedback)
 class FeedbackAdmin(admin.ModelAdmin):
     list_display = ('id', 'order', 'food_rating', 'service_rating', 'comments', 'created_at')

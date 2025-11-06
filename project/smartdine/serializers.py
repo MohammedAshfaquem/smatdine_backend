@@ -7,7 +7,6 @@ from .models import Table,MenuItem,Cart,CartItem,Order,OrderItem,Feedback,Waiter
 
 User = get_user_model()
 
-
 class StaffRegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, min_length=6)
     confirm_password = serializers.CharField(write_only=True, min_length=6)
@@ -31,8 +30,6 @@ class StaffRegisterSerializer(serializers.ModelSerializer):
         validated_data.pop('confirm_password')
         validated_data['password'] = make_password(validated_data['password'])
         return super().create(validated_data)
-
-
 
 class StaffLoginSerializer(serializers.Serializer):
     email = serializers.EmailField()
@@ -59,28 +56,34 @@ class StaffLoginSerializer(serializers.Serializer):
         raise serializers.ValidationError("Invalid email or password.")
     
 class TableSerializer(serializers.ModelSerializer):
+    orders = serializers.SerializerMethodField()
+    requests = serializers.SerializerMethodField()
+
     class Meta:
         model = Table
-        fields = ['id', 'table_number', 'seats', 'status']
-        
+        fields = ['id', 'table_number', 'seats', 'status', 'orders', 'requests']
+
+    def get_orders(self, obj):
+        """Return all orders related to this table"""
+        from .models import Order
+        orders = Order.objects.filter(table=obj)
+        return OrderSerializer(orders, many=True).data
+
+    def get_requests(self, obj):
+        """Return all waiter requests related to this table"""
+        from .models import WaiterRequest
+        requests = WaiterRequest.objects.filter(table=obj)
+        return WaiterRequestSerializer(requests, many=True).data
+
 class StaffSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ['id', 'name', 'email', 'role', 'is_active', 'is_blocked']
-        
-        
+               
 class MenuItemSerializer(serializers.ModelSerializer):
     class Meta:
         model = MenuItem
         fields = "__all__"
-
-
-
-
-
-
-        
-
 
 class FeedbackSerializer(serializers.ModelSerializer):
     class Meta:
@@ -99,12 +102,10 @@ class BaseSerializer(serializers.ModelSerializer):
         model = Base
         fields = ["id", "name", "price","description"]
 
-
 class IngredientSerializer(serializers.ModelSerializer):
     class Meta:
         model = Ingredient
         fields = ["id", "name", "category", "price"]
-
 
 class CustomDishIngredientSerializer(serializers.ModelSerializer):
     ingredient = IngredientSerializer(read_only=True)
@@ -113,7 +114,6 @@ class CustomDishIngredientSerializer(serializers.ModelSerializer):
     class Meta:
         model = CustomDishIngredient
         fields = ["id", "ingredient", "ingredient_id", "quantity"]
-
 
 class CustomDishSerializer(serializers.ModelSerializer):
     base = BaseSerializer(read_only=True)
@@ -130,12 +130,14 @@ class CustomDishSerializer(serializers.ModelSerializer):
             "name",
             "base",
             "base_id",
-            "ingredients",       # write-only payload
-            "dish_ingredients",  # read-only representation
+            "ingredients",      
+            "dish_ingredients",  
             "special_notes",
             "total_price",
             "sold_count", 
-            "preparation_time",  # ✅ new field
+            "image_url",     
+            "image_status", 
+            "preparation_time", 
             "created_at",
         ]
         read_only_fields = [
@@ -143,14 +145,15 @@ class CustomDishSerializer(serializers.ModelSerializer):
             "created_at",
             "dish_ingredients",
             "base",
-            "preparation_time",  # ✅ keep read-only
+            "image_url",      
+            "image_status", 
+            "preparation_time",
             "sold_count", 
         ]
-
-        
+  
 class CartItemSerializer(serializers.ModelSerializer):
     menu_item = MenuItemSerializer(read_only=True)
-    custom_dish = CustomDishSerializer(read_only=True)  # 👈 include this
+    custom_dish = CustomDishSerializer(read_only=True) 
     menu_item_id = serializers.PrimaryKeyRelatedField(
         queryset=MenuItem.objects.all(),
         source='menu_item',
@@ -163,7 +166,7 @@ class CartItemSerializer(serializers.ModelSerializer):
         fields = [
             'id',
             'menu_item',
-            'custom_dish',         # 👈 include this
+            'custom_dish',       
             'menu_item_id',
             'quantity',
             'special_instructions',
@@ -198,8 +201,6 @@ class OrderItemSerializer(serializers.ModelSerializer):
     def get_menu_item_name(self, obj):
         return obj.menu_item.name if obj.menu_item else None
 
-
-
 class OrderSerializer(serializers.ModelSerializer):
     items = OrderItemSerializer(many=True, read_only=True)
     table_number = serializers.SerializerMethodField()
@@ -208,7 +209,7 @@ class OrderSerializer(serializers.ModelSerializer):
         model = Order
         fields = [
             "id",
-            "table_number",  # ✅ this now comes from get_table_number()
+            "table_number", 
             "status",
             "total",
             "estimated_time",

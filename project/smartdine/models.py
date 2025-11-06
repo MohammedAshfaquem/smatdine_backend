@@ -11,8 +11,6 @@ from django.utils import timezone
 from decimal import Decimal
 
 
-
-
 class UserManager(BaseUserManager):
     def create_user(self, email, name, role='waiter', password=None, **extra_fields):
         if not email:
@@ -39,8 +37,6 @@ class UserManager(BaseUserManager):
         user.save(using=self._db)
         return user
 
-
-
 class User(AbstractBaseUser, PermissionsMixin):
     ROLE_CHOICES = [
         ('admin', 'Admin'),
@@ -58,8 +54,6 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_email_verified = models.BooleanField(default=False)
     is_approved_by_admin = models.BooleanField(default=False)
     email_verification_token = models.UUIDField(default=uuid.uuid4, editable=False)
-
-    # 🔐 Password reset fields
     password_reset_token = models.UUIDField(null=True, blank=True)
     password_reset_sent_at = models.DateTimeField(null=True, blank=True)
 
@@ -71,14 +65,12 @@ class User(AbstractBaseUser, PermissionsMixin):
     def __str__(self):
         return f"{self.name} ({self.email})"
 
-    # ✅ Create password reset token
     def create_reset_token(self):
         self.password_reset_token = uuid.uuid4()
         self.password_reset_sent_at = timezone.now()
         self.save(update_fields=["password_reset_token", "password_reset_sent_at"])
         return self.password_reset_token
 
-    # ✅ Validate token (10 min expiry)
     def is_reset_token_valid(self, token, expiry_minutes=10):
         if not self.password_reset_token or not self.password_reset_sent_at:
             return False
@@ -87,13 +79,10 @@ class User(AbstractBaseUser, PermissionsMixin):
         expiry_time = self.password_reset_sent_at + timedelta(minutes=expiry_minutes)
         return timezone.now() <= expiry_time
 
-    # ✅ Clear after successful reset
     def clear_reset_token(self):
         self.password_reset_token = None
         self.password_reset_sent_at = None
         self.save(update_fields=["password_reset_token", "password_reset_sent_at"])
-
-
 
 class Table(models.Model):
     STATUS_CHOICES = [
@@ -157,15 +146,18 @@ class MenuItem(models.Model):
     spice_level = models.IntegerField(choices=SPICE_CHOICES, default=0)
     customizable = models.BooleanField(default=False)
     image = models.ImageField(upload_to='menu_images/', null=True, blank=True)
+    stock = models.PositiveIntegerField(default=0, help_text="Available quantity for this item")
     availability = models.BooleanField(default=True)
-    preparation_time = models.PositiveIntegerField(default=10)  # ⏱️ time in minutes
+    preparation_time = models.PositiveIntegerField(default=10) 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return f"{self.name} ({self.type})"
 
-
+    def is_available(self):
+        """Check if item can be ordered based on stock and availability."""
+        return self.availability and self.stock > 0
 
 class Cart(models.Model):
     table = models.ForeignKey(Table, on_delete=models.CASCADE, related_name="cart")
@@ -179,11 +171,8 @@ class Cart(models.Model):
     def total_amount(self):
         return sum(item.subtotal for item in self.items.all())
 
-
 class CartItem(models.Model):
     cart = models.ForeignKey(Cart, on_delete=models.CASCADE, related_name="items")
-
-    # One of these will be filled (normal item or custom dish)
     menu_item = models.ForeignKey(MenuItem, on_delete=models.CASCADE, null=True, blank=True)
     custom_dish = models.ForeignKey("CustomDish", on_delete=models.CASCADE, null=True, blank=True)
 
@@ -203,7 +192,6 @@ class CartItem(models.Model):
         if self.is_custom and self.custom_dish:
             return float(self.custom_dish.total_price) * self.quantity
         return float(self.menu_item.price) * self.quantity
-
 
 class Order(models.Model):
     STATUS_CHOICES = [
@@ -225,11 +213,7 @@ class Order(models.Model):
 
     def update_total_and_eta(self):
         items = self.items.select_related("menu_item", "custom_dish").all()
-
-        # ✅ 1. Calculate total
         self.total = sum(item.subtotal for item in items)
-
-        # ✅ 2. Calculate total preparation time
         total_time = 0
         for item in items:
             if item.menu_item:
@@ -237,9 +221,8 @@ class Order(models.Model):
             elif item.custom_dish:
                 total_time += (item.custom_dish.preparation_time or 0) * item.quantity
 
-        self.estimated_time = total_time or 10  # fallback: 10 min
+        self.estimated_time = total_time or 10 
         self.save()
-
 
 class OrderItem(models.Model):
     order = models.ForeignKey("Order", on_delete=models.CASCADE, related_name="items")
@@ -263,14 +246,12 @@ class OrderItem(models.Model):
             return f"{self.custom_dish.name} (Custom) x{self.quantity}"
         return f"Unknown Item x{self.quantity}"
 
-
-
-
 class WaiterRequest(models.Model):
     TYPE_CHOICES = [
         ('need water', 'Need Water'),
         ('need bill', 'Need Bill'),
         ('clean table', 'Clean Table'),
+        ('general', 'General Request'),
     ]
 
     STATUS_CHOICES = [
@@ -281,17 +262,14 @@ class WaiterRequest(models.Model):
 
     table = models.ForeignKey(Table, on_delete=models.CASCADE)
     type = models.CharField(max_length=20, choices=TYPE_CHOICES)
+    description = models.TextField(blank=True, null=True) 
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return f"{self.type} - Table {self.table.table_number}"
-
-
-
-    
-    
+  
 class Feedback(models.Model):
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="feedback")
     food_rating = models.PositiveIntegerField(default=0)
@@ -302,7 +280,6 @@ class Feedback(models.Model):
     def __str__(self):
         return f"Feedback for Order #{self.order.id}"
 
-
 class Base(models.Model):
     name = models.CharField(max_length=100)
     description = models.TextField(blank=True, null=True)
@@ -311,8 +288,6 @@ class Base(models.Model):
     def __str__(self):
        return self.name
    
-
-
 class Ingredient(models.Model):
     CATEGORY_CHOICES = [
         ('fruit', 'Fruit'),
@@ -330,7 +305,6 @@ class Ingredient(models.Model):
     def __str__(self):
         return f"{self.name} ({self.get_category_display()}) - ₹{self.price}"
 
-
 class CustomDish(models.Model):
     table = models.ForeignKey(
         "Table",
@@ -343,9 +317,11 @@ class CustomDish(models.Model):
     base = models.ForeignKey("Base", on_delete=models.SET_NULL, null=True, blank=True)
     total_price = models.DecimalField(max_digits=8, decimal_places=2, default=Decimal("0.00"))
     special_notes = models.TextField(blank=True, null=True)
-    preparation_time = models.PositiveIntegerField(default=0, help_text="Time in minutes")  # ✅ added
+    preparation_time = models.PositiveIntegerField(default=0, help_text="Time in minutes")
     created_at = models.DateTimeField(auto_now_add=True)
     sold_count = models.PositiveIntegerField(default=0)
+    image_url = models.URLField(blank=True, null=True)
+    image_status = models.CharField(max_length=20, default="pending")  
 
     def calculate_total(self):
         """Calculate total = base price + all ingredients"""
@@ -360,7 +336,7 @@ class CustomDish(models.Model):
         Optional: estimate preparation time.
         Example: base has time + ingredients add extra minutes.
         """
-        base_time = getattr(self.base, "preparation_time", 5)  # assume base has 5 min default
+        base_time = getattr(self.base, "preparation_time", 5)  
         ingredients_time = sum(
             getattr(item.ingredient, "preparation_time", 1) * item.quantity
             for item in self.dish_ingredients.all()
@@ -388,8 +364,6 @@ class CustomDish(models.Model):
     def __str__(self):
         return f"{self.name or 'Custom Dish'} - ₹{self.total_price} ({self.preparation_time} min)"
 
-
-
 class CustomDishIngredient(models.Model):
     custom_dish = models.ForeignKey(
         CustomDish,
@@ -404,3 +378,4 @@ class CustomDishIngredient(models.Model):
 
     def __str__(self):
         return self.ingredient.name
+    

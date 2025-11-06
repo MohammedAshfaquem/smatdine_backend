@@ -4,14 +4,16 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    ports:
+    ports: 
       - "8000:8000"
     volumes:
-      - "C:\\Users\\Afi\\Desktop\\SmartDine\\backend\\project:/app"
+      - "C:/Users/Afi/Desktop/SmartDine/backend/project:/app"
     environment:
       - PYTHONUNBUFFERED=1
+      - UNSPLASH_ACCESS_KEY=${UNSPLASH_ACCESS_KEY}
     command: >
       sh -c "python manage.py runserver 0.0.0.0:8000"
+    restart: unless-stopped
 
 volumes:
   smartdine_db_data:

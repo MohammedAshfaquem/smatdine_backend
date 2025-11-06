@@ -1,8 +1,9 @@
+from http import client
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
 from django.core.mail import send_mail
 from django.shortcuts import get_object_or_404,redirect
-from rest_framework import status, permissions,parsers
+from rest_framework import status, permissions,parsers,viewsets
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny,IsAuthenticated
 from rest_framework.response import Response
@@ -14,7 +15,7 @@ from .serializers import (StaffRegisterSerializer,
 )
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
-from .utils import send_verification_email
+from .utils import send_verification_email,get_unsplash_image
 from .models import Table,MenuItem,CartItem,Cart,OrderItem,Order,Feedback,WaiterRequest,Base,CustomDish,CustomDishIngredient,Ingredient
 from django.conf import settings
 from datetime import timedelta
@@ -223,7 +224,6 @@ class StaffListView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        # Show only admin-approved staff
         staff = User.objects.filter(role__in=['kitchen', 'waiter'], is_approved_by_admin=True)
         serializer = StaffSerializer(staff, many=True)
         return Response(serializer.data)
@@ -258,21 +258,17 @@ class MenuItemAPIView(APIView):
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
 
     def get_permissions(self):
-        # Anyone can view menu; authenticated users can modify
         if self.request.method == "GET":
             return [permissions.AllowAny()]
         return [permissions.IsAuthenticated()]
 
-    # ✅ GET: List or filter menu items dynamically
     def get(self, request):
         queryset = MenuItem.objects.all().order_by('-created_at')
 
-        # Get query parameters from URL
         category = request.query_params.get("category")
         item_type = request.query_params.get("type")
         available = request.query_params.get("available")
 
-        # ✅ Apply filters if provided
         if category:
             queryset = queryset.filter(category__iexact=category)
         if item_type:
@@ -283,7 +279,6 @@ class MenuItemAPIView(APIView):
         serializer = MenuItemSerializer(queryset, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
-    # ✅ POST: Create a new menu item
     def post(self, request):
         serializer = MenuItemSerializer(data=request.data)
         if serializer.is_valid():
@@ -302,13 +297,11 @@ class MenuItemDetailAPIView(APIView):
             return [permissions.AllowAny()]
         return [permissions.IsAuthenticated()]
 
-    # GET: Retrieve single item
     def get(self, request, pk):
         item = get_object_or_404(MenuItem, pk=pk)
         serializer = MenuItemSerializer(item)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
-    # PUT: Update full item
     def put(self, request, pk):
         item = get_object_or_404(MenuItem, pk=pk)
         serializer = MenuItemSerializer(item, data=request.data)
@@ -320,7 +313,6 @@ class MenuItemDetailAPIView(APIView):
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    # PATCH: Partial update (like changing availability)
     def patch(self, request, pk):
         item = get_object_or_404(MenuItem, pk=pk)
         serializer = MenuItemSerializer(item, data=request.data, partial=True)
@@ -332,7 +324,6 @@ class MenuItemDetailAPIView(APIView):
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    # DELETE: Delete item
     def delete(self, request, pk):
         item = get_object_or_404(MenuItem, pk=pk)
         item.delete()
@@ -340,6 +331,7 @@ class MenuItemDetailAPIView(APIView):
             {"message": "Menu item deleted successfully"},
             status=status.HTTP_204_NO_CONTENT,
         )
+
 class CartAPIView(APIView):
     permission_classes = [permissions.AllowAny]
 
@@ -348,14 +340,11 @@ class CartAPIView(APIView):
         table = get_object_or_404(Table, table_number=table_number)
         cart, _ = Cart.objects.get_or_create(table=table)
         return cart
-
-    # 🛒 Get full cart by table
     def get(self, request, table_number):
         cart = self.get_cart(table_number)
         serializer = CartSerializer(cart)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
-    # ➕ Add menu item or custom dish
     def post(self, request):
         table_number = request.data.get("table_number")
         menu_item_id = request.data.get("menu_item_id")
@@ -369,7 +358,6 @@ class CartAPIView(APIView):
 
         cart = self.get_cart(table_number)
 
-        # Handle adding a custom dish
         if is_custom:
             if not custom_dish_id:
                 return Response({"error": "Missing custom_dish_id"}, status=status.HTTP_400_BAD_REQUEST)
@@ -385,13 +373,20 @@ class CartAPIView(APIView):
                     "menu_item": None,
                 },
             )
-
         else:
-            # Normal menu item
             if not menu_item_id:
                 return Response({"error": "Missing menu_item_id"}, status=status.HTTP_400_BAD_REQUEST)
 
             menu_item = get_object_or_404(MenuItem, id=menu_item_id)
+            existing_cart_item = CartItem.objects.filter(cart=cart, menu_item=menu_item).first()
+            existing_quantity = existing_cart_item.quantity if existing_cart_item else 0
+
+            if menu_item.stock is not None and (existing_quantity + quantity) > menu_item.stock:
+                return Response(
+                    {"error": f"Only {menu_item.stock - existing_quantity} item(s) available in your cart"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
             cart_item, created = CartItem.objects.get_or_create(
                 cart=cart,
                 menu_item=menu_item,
@@ -402,18 +397,21 @@ class CartAPIView(APIView):
                 },
             )
 
-        # If already exists, update quantity and notes
+        # Update quantity if already exists
         if not created:
-            cart_item.quantity += quantity
+            new_quantity = cart_item.quantity + quantity
+            if cart_item.menu_item and cart_item.menu_item.stock is not None:
+                if new_quantity > cart_item.menu_item.stock:
+                    return Response(
+                        {"error": f"Only {cart_item.menu_item.stock - cart_item.quantity} more item(s) can be added"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            cart_item.quantity = new_quantity
             if special_instructions:
                 cart_item.special_instructions = special_instructions
             cart_item.save()
 
-        name = (
-            cart_item.custom_dish.name
-            if getattr(cart_item, "is_custom", False)
-            else cart_item.menu_item.name
-        )
+        name = cart_item.custom_dish.name if cart_item.is_custom else cart_item.menu_item.name
 
         return Response(
             {
@@ -424,54 +422,69 @@ class CartAPIView(APIView):
             status=status.HTTP_201_CREATED,
         )
 
-    # 🔄 Update item quantity
+    # 🔄 Update quantity
     def patch(self, request):
         table_number = request.data.get("table_number")
         item_id = request.data.get("item_id")
-        quantity = request.data.get("quantity")
+        quantity = int(request.data.get("quantity"))
 
         if not table_number or not item_id:
-            return Response(
-                {"error": "Missing table_number or item_id"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return Response({"error": "Missing table_number or item_id"}, status=status.HTTP_400_BAD_REQUEST)
 
         cart = self.get_cart(table_number)
         cart_item = get_object_or_404(CartItem, id=item_id, cart=cart)
 
+        if cart_item.menu_item and cart_item.menu_item.stock is not None:
+            if quantity > cart_item.menu_item.stock:
+                return Response(
+                    {"error": f"Only {cart_item.menu_item.stock} item(s) available in stock"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         cart_item.quantity = quantity
         cart_item.save()
-
-        return Response(
-            {"message": f"Quantity updated for Table {cart.table.table_number}"},
-            status=status.HTTP_200_OK,
-        )
+        return Response({"message": f"Quantity updated for Table {cart.table.table_number}"}, status=status.HTTP_200_OK)
 
     # ❌ Remove item
     def delete(self, request, item_id):
         table_number = request.query_params.get("table_number")
         if not table_number:
-            return Response(
-                {"error": "Missing table_number in query params"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return Response({"error": "Missing table_number in query params"}, status=status.HTTP_400_BAD_REQUEST)
 
         cart = self.get_cart(table_number)
         cart_item = get_object_or_404(CartItem, id=item_id, cart=cart)
         cart_item.delete()
+        return Response({"message": f"Item removed from Table {cart.table.table_number}"}, status=status.HTTP_204_NO_CONTENT)
 
-        return Response(
-            {"message": f"Item removed from Table {cart.table.table_number}"},
-            status=status.HTTP_204_NO_CONTENT,
-        )
-        
+    # 🔍 Get quantity of a single item in cart
+    def get_item_quantity(self, request, table_number, menu_item_id=None, custom_dish_id=None):
+        cart = self.get_cart(table_number)
+        if menu_item_id:
+            cart_item = CartItem.objects.filter(cart=cart, menu_item_id=menu_item_id).first()
+        elif custom_dish_id:
+            cart_item = CartItem.objects.filter(cart=cart, custom_dish_id=custom_dish_id).first()
+        else:
+            return Response({"quantity": 0})
+        return Response({"quantity": cart_item.quantity if cart_item else 0})
+
+class CartItemQuantityAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, table_number):
+        menu_item_id = request.query_params.get("menu_item_id")
+        cart = get_object_or_404(Cart, table__table_number=table_number)
+        quantity = 0
+        if menu_item_id:
+            cart_item = CartItem.objects.filter(cart=cart, menu_item_id=menu_item_id).first()
+            if cart_item:
+                quantity = cart_item.quantity
+        return Response({"quantity": quantity}, status=status.HTTP_200_OK) 
 
 class CartCountView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request, table_number):
         try:
-            # 👇 Adjust this based on your Table model field
             cart = Cart.objects.filter(table__table_number=table_number).first()
             count = 0
             if cart and hasattr(cart, 'items'):
@@ -480,8 +493,7 @@ class CartCountView(APIView):
         except Exception as e:
             return Response({"count": 0, "error": str(e)}, status=500)
 
-        
-        
+                
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def get_cart(request, table_number):
@@ -510,30 +522,47 @@ class OrderAPIView(APIView):
 
     def post(self, request):
         """
-        Convert Cart → Order
+        Convert Cart → Order and decrease stock for menu items.
         """
         table_number = request.data.get("table_number")
         if not table_number:
-            return Response({"error": "Missing table_number"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "Missing table_number"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         table = get_object_or_404(Table, table_number=table_number)
         cart = get_object_or_404(Cart, table=table)
         cart_items = CartItem.objects.filter(cart=cart)
 
         if not cart_items.exists():
-            return Response({"error": "Cart is empty"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "Cart is empty"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         order = Order.objects.create(table=table, status="pending")
         total = Decimal("0.00")
 
         for item in cart_items:
             if item.menu_item:
-                subtotal = Decimal(item.menu_item.price) * item.quantity
+                menu_item = item.menu_item
+                subtotal = Decimal(menu_item.price) * item.quantity
+
+                if menu_item.stock is not None:
+                    if menu_item.stock < item.quantity:
+                        return Response(
+                            {"error": f"Not enough stock for {menu_item.name}. Only {menu_item.stock} left."},
+                            status=status.HTTP_400_BAD_REQUEST
+                        )
+                    menu_item.stock -= item.quantity
+                    menu_item.save()
+
                 OrderItem.objects.create(
                     order=order,
-                    menu_item=item.menu_item,
+                    menu_item=menu_item,
                     quantity=item.quantity,
-                    price=item.menu_item.price,
+                    price=menu_item.price,
                     subtotal=subtotal,
                 )
                 total += subtotal
@@ -552,10 +581,8 @@ class OrderAPIView(APIView):
         order.total = total
         order.update_total_and_eta()
 
-        # ✅ Calculate when the order will be ready
         expected_ready_time = timezone.now() + timedelta(minutes=order.estimated_time)
 
-        # ✅ Clear cart
         cart_items.delete()
 
         serializer = OrderSerializer(order)
@@ -569,7 +596,6 @@ class OrderAPIView(APIView):
             },
             status=status.HTTP_201_CREATED,
         )
-
 
 class TableOrdersAPIView(APIView):
     permission_classes = [permissions.AllowAny]
@@ -595,24 +621,29 @@ class TableOrdersAPIView(APIView):
 
                 items = []
                 for item in OrderItem.objects.filter(order=order):
-                    if item.menu_item:  # ✅ normal menu item
+                    if item.menu_item:  
                         items.append({
                             "type": "menu_item",
                             "name": item.menu_item.name,
                             "image": item.menu_item.image.url if item.menu_item.image else None,
                             "quantity": item.quantity,
                             "subtotal": str(item.subtotal),
+                            "preparation_time": getattr(item.menu_item, 'preparation_time', None),
+                            "spice_level": getattr(item.menu_item, 'spice_level', None),
                         })
-                    elif item.custom_dish:  # ✅ custom dish
+                    elif item.custom_dish:  
                         items.append({
                             "type": "custom_dish",
                             "name": item.custom_dish.name,
+                            "image": item.custom_dish.image_url,  
                             "ingredients": [
                                 {
                                     "name": di.ingredient.name,
                                     "quantity": di.quantity
                                 } for di in item.custom_dish.dish_ingredients.all()
                             ],
+                            "base": item.custom_dish.base.name if getattr(item.custom_dish, 'base', None) else None,
+                            "preparation_time": getattr(item.custom_dish, 'preparation_time', None),
                             "quantity": item.quantity,
                             "subtotal": str(item.subtotal),
                         })
@@ -633,39 +664,35 @@ class TableOrdersAPIView(APIView):
 
         except Exception as e:
             return Response({"error": str(e)}, status=500)
+         
 class OrderDetailAPIView(APIView):
     permission_classes = [permissions.AllowAny]
-
     def get(self, request, order_id):
         try:
             order = get_object_or_404(Order, id=order_id)
-
-            # ✅ Estimated and ready time
             estimated_minutes = order.estimated_time or 0
             expected_ready_time = order.created_at + timedelta(minutes=estimated_minutes)
 
             now = timezone.now()
             remaining = expected_ready_time - now
             minutes_left = max(int(remaining.total_seconds() // 60), 0)
-            time_remaining = (
-                f"{minutes_left} minutes left" if minutes_left > 0 else "Ready"
-            )
-
-            # ✅ Fetch all order items (handle both menu + custom dish)
+            time_remaining = f"{minutes_left} minutes left" if minutes_left > 0 else "Ready"
             items = []
             for item in OrderItem.objects.filter(order=order):
-                if item.menu_item:  # Normal menu item
+                if item.menu_item:
                     items.append({
                         "type": "menu_item",
                         "name": item.menu_item.name,
                         "image": item.menu_item.image.url if item.menu_item.image else None,
                         "quantity": item.quantity,
                         "subtotal": str(item.subtotal),
+                        "preparation_time": getattr(item.menu_item, "preparation_time", None),
                     })
-                elif item.custom_dish:  # Custom dish
+                elif item.custom_dish:
                     items.append({
                         "type": "custom_dish",
                         "name": item.custom_dish.name,
+                        "image": item.custom_dish.image_url,  
                         "ingredients": [
                             {
                                 "name": di.ingredient.name,
@@ -677,7 +704,6 @@ class OrderDetailAPIView(APIView):
                         "subtotal": str(item.subtotal),
                     })
 
-            # ✅ Final response
             data = {
                 "id": order.id,
                 "table_number": order.table.table_number,
@@ -694,12 +720,9 @@ class OrderDetailAPIView(APIView):
 
         except Exception as e:
             return Response({"error": str(e)}, status=500)
-
-        
-
-        
+  
 class FeedbackAPIView(APIView):
-    permission_classes = [permissions.AllowAny]  # ✅ Allow anyone (no login required)
+    permission_classes = [permissions.AllowAny]  
 
     def get(self, request, order_id):
         """Check if feedback exists for this order"""
@@ -710,7 +733,6 @@ class FeedbackAPIView(APIView):
         """Submit feedback for an order"""
         order = get_object_or_404(Order, id=order_id)
 
-        # Prevent multiple submissions
         if Feedback.objects.filter(order=order).exists():
             return Response(
                 {"message": "Feedback already exists"},
@@ -725,19 +747,17 @@ class FeedbackAPIView(APIView):
         )
         return Response({"message": "Feedback submitted successfully"}, status=status.HTTP_201_CREATED)
     
-    
 class WaiterRequestAPIView(APIView):
     """
-    Customer creates a waiter request (e.g., need water, need bill, clean table)
+    Customer creates a waiter request (e.g., need water, need bill, clean table, general)
     """
     permission_classes = [permissions.AllowAny]
 
     def post(self, request, table_id):
-        # Support both table id and table_number matching
         table = get_object_or_404(Table, table_number=table_id)
 
         req_type = request.data.get("type")
-        valid_types = ['need water', 'need bill', 'clean table']
+        valid_types = ['need water', 'need bill', 'clean table', 'general']
 
         if req_type not in valid_types:
             return Response(
@@ -745,14 +765,15 @@ class WaiterRequestAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Create the request
-        WaiterRequest.objects.create(table=table, type=req_type)
+        description = request.data.get("description", "") if req_type == "general" else ""
 
-        return Response(
-            {"message": f"Waiter request '{req_type}' sent for Table {table.table_number}"},
-            status=status.HTTP_201_CREATED,
-        )
+        WaiterRequest.objects.create(table=table, type=req_type, description=description)
 
+        msg = f"Waiter request '{req_type}' sent for Table {table.table_number}"
+        if req_type == "general" and description:
+            msg += f": {description}"
+
+        return Response({"message": msg}, status=status.HTTP_201_CREATED)
 
 class WaiterRequestListAPIView(APIView):
     """
@@ -774,7 +795,6 @@ class WaiterRequestListAPIView(APIView):
             for r in requests
         ]
         return Response(data, status=status.HTTP_200_OK)
-
 
 class WaiterRequestUpdateAPIView(APIView):
     """
@@ -806,6 +826,7 @@ class WaiterRequestUpdateAPIView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+        
 class KitchenOrdersAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -817,7 +838,6 @@ class KitchenOrdersAPIView(APIView):
         orders = Order.objects.filter(status__in=["pending", "preparing"]).order_by("-created_at")
         serializer = OrderSerializer(orders, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
-
 
 class UpdateOrderStatusAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -847,13 +867,12 @@ class UpdateOrderStatusAPIView(APIView):
     
 class ReadyOrdersAPIView(APIView):
     """List all ready orders for waiters to serve."""
-    permission_classes = [permissions.AllowAny]  # change later if you use JWT
+    permission_classes = [permissions.AllowAny]
 
     def get(self, request):
         ready_orders = Order.objects.filter(status="ready").prefetch_related("items", "table")
         serializer = OrderSerializer(ready_orders, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
-
 
 class MarkOrderServedAPIView(APIView):
     """Mark an order as served by the waiter."""
@@ -895,7 +914,7 @@ class WaiterRequestsByTableAPIView(APIView):
 
     
 @api_view(['PATCH'])
-@permission_classes([permissions.AllowAny])  # since customers are public users
+@permission_classes([permissions.AllowAny])  
 def occupy_table(request, table_number):
     """
     When customer scans QR → mark table as occupied
@@ -944,7 +963,6 @@ class BaseListView(APIView):
         serializer = BaseSerializer(bases, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
-
 class IngredientListView(APIView):
     permission_classes = [permissions.AllowAny]
 
@@ -955,70 +973,86 @@ class IngredientListView(APIView):
 
 
 class CreateCustomDishView(APIView):
-    """
-    POST payload example:
-    {
-      "name": "Berry Blast Supreme",
-      "base_id": 1,
-      "special_notes": "Extra ice",
-      "ingredients": [
-         {"ingredient_id": 3, "quantity": 1},
-         {"ingredient_id": 7, "quantity": 2}
-      ],
-      "add_to_cart": true
-    }
-    """
-    permission_classes = [permissions.AllowAny]  # customers can create
+    permission_classes = [permissions.AllowAny]
 
     def post(self, request, table_id):
-        # ✅ Get the table using table_number (for consistency)
-        table = get_object_or_404(Table, table_number=table_id)
+        print("POST payload received:", request.data)
+        try:
+            table = get_object_or_404(Table, table_number=table_id)
+            print("Table found:", table)
+        except Exception as e:
+            print("Table lookup failed:", e)
+            raise
+
         serializer = CustomDishSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-
         base_id = serializer.validated_data.get("base_id")
         name = serializer.validated_data.get("name")
         special_notes = serializer.validated_data.get("special_notes", "")
         ingredients_payload = request.data.get("ingredients", [])
         add_to_cart = request.data.get("add_to_cart", True)
 
-        base = get_object_or_404(Base, id=base_id)
+        try:
+            base = get_object_or_404(Base, id=base_id)
+            print("Base found:", base)
+        except Exception as e:
+            print("Base lookup failed:", e)
+            raise
 
-        # ✅ Create dish and associate with the table
+        # Create CustomDish
         custom_dish = CustomDish.objects.create(
             name=name,
             base=base,
             special_notes=special_notes,
             total_price=Decimal("0.00"),
-            table=table,  # ✅ associate with table
+            table=table,
         )
 
         total_price = Decimal(base.price or 0)
-        total_time = base.preparation_time if hasattr(base, "preparation_time") else 0  # optional
+        total_time = getattr(base, "preparation_time", 0)
 
-        # ✅ Add ingredients
+        # Add ingredients
         for item in ingredients_payload:
             ing_id = item.get("ingredient_id")
-            qty = int(item.get("quantity", 1))
-            if qty <= 0:
-                qty = 1
+            qty = max(int(item.get("quantity", 1)), 1)
+            print(f"Processing ingredient_id={ing_id} with qty={qty}")
 
-            ingredient = get_object_or_404(Ingredient, id=ing_id)
+            try:
+                ingredient = get_object_or_404(Ingredient, id=ing_id)
+                print("Ingredient found:", ingredient)
+            except Exception as e:
+                print(f"Ingredient lookup failed for id={ing_id}: {e}")
+                raise
+
             CustomDishIngredient.objects.create(
                 custom_dish=custom_dish,
                 ingredient=ingredient,
                 quantity=qty,
             )
             total_price += Decimal(ingredient.price) * qty
-            # optional: if Ingredient has prep_time
             total_time += getattr(ingredient, "preparation_time", 0) * qty
 
-        # ✅ Save updated totals
+        # Save totals
         custom_dish.total_price = total_price
-        custom_dish.preparation_time = total_time  # ✅ update prep time
+        custom_dish.preparation_time = total_time
         custom_dish.save()
 
-        # ✅ Optionally add to the cart
+        # Generate Unsplash image
+        try:
+            image_url = get_unsplash_image(custom_dish)
+            if image_url:
+                custom_dish.image_url = image_url
+                custom_dish.image_status = "done"
+                custom_dish.save(update_fields=["image_url", "image_status"])
+            else:
+                custom_dish.image_status = "failed"
+                custom_dish.save(update_fields=["image_status"])
+        except Exception as e:
+            print("Failed to generate image:", e)
+            custom_dish.image_status = "failed"
+            custom_dish.save(update_fields=["image_status"])
+
+        # Optionally add to cart
         if add_to_cart:
             cart, _ = Cart.objects.get_or_create(table=table)
             CartItem.objects.create(
@@ -1032,10 +1066,14 @@ class CreateCustomDishView(APIView):
 
         out_serializer = CustomDishSerializer(custom_dish)
         return Response(
-            {"message": "Custom dish created successfully", "dish": out_serializer.data},
+            {
+                "message": "Custom dish created successfully",
+                "dish": out_serializer.data,
+                "image_url": custom_dish.image_url,
+                "image_status": custom_dish.image_status,
+            },
             status=status.HTTP_201_CREATED,
         )
-
 
 class CustomDishListByTableView(APIView):
     permission_classes = [permissions.AllowAny]
@@ -1046,9 +1084,8 @@ class CustomDishListByTableView(APIView):
         serializer = CustomDishSerializer(dishes, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
-
 class CustomDishListAllView(APIView):
-    permission_classes = [permissions.AllowAny]  # allow all to view
+    permission_classes = [permissions.AllowAny] 
 
     def get(self, request):
         user = request.user if request.user.is_authenticated else None
@@ -1059,8 +1096,6 @@ class CustomDishListAllView(APIView):
             .prefetch_related("dish_ingredients__ingredient")
             .order_by("-sold_count", "-created_at")
         )
-
-        # 🧠 Customers (unauthenticated or role=customer)
         if (not user or getattr(user, "role", None) == "customer") and not show_all:
             top_dishes = dishes[:3]
             serializer = CustomDishSerializer(top_dishes, many=True)
@@ -1069,17 +1104,12 @@ class CustomDishListAllView(APIView):
                 "show_all": False,
                 "data": serializer.data,
             }, status=status.HTTP_200_OK)
-
-        # 👨‍🍳 Admin/Waiter (or ?all=true)
         serializer = CustomDishSerializer(dishes, many=True)
         return Response({
             "message": "All custom dishes",
             "show_all": True,
             "data": serializer.data,
         }, status=status.HTTP_200_OK)
-
-
-
 
 class ReorderCustomDishView(APIView):
     permission_classes = [permissions.AllowAny]
@@ -1096,3 +1126,33 @@ class ReorderCustomDishView(APIView):
             custom_dish=custom_dish,
         )
         return Response({"message": "Added custom dish to cart"}, status=status.HTTP_201_CREATED)
+     
+def generate_custom_dish_image(custom_dish):
+    base = getattr(custom_dish.base, "name", "dish")
+    ingredients = ", ".join(
+        f"{di.quantity}x {di.ingredient.name}" for di in custom_dish.dish_ingredients.all()
+    )
+    notes = custom_dish.special_notes or ""
+    prompt = (
+        f"High quality photo of a {base}-based beverage made with {ingredients}. "
+        f"{notes}. Served attractively on a table, natural lighting, photorealistic."
+    )
+
+    try:
+        result = client.images.generate(
+            model="gpt-image-1",
+            prompt=prompt,
+            size="512x512"
+        )
+        image_url = result.data[0].url
+        custom_dish.image_url = image_url
+        custom_dish.image_status = "ready"
+        custom_dish.save(update_fields=["image_url", "image_status"])
+        return image_url
+    except Exception as e:
+        custom_dish.image_status = "failed"
+        custom_dish.save(update_fields=["image_status"])
+        print("Image generation failed:", e)
+        return None
+    
+    
