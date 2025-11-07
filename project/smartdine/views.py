@@ -16,12 +16,16 @@ from .serializers import (StaffRegisterSerializer,
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 from .utils import send_verification_email,get_unsplash_image
-from .models import Table,MenuItem,CartItem,Cart,OrderItem,Order,Feedback,WaiterRequest,Base,CustomDish,CustomDishIngredient,Ingredient
+from .models import (Table,MenuItem,CartItem,Cart,OrderItem,Order,
+                     Feedback,WaiterRequest,Base,CustomDish,
+                     CustomDishIngredient,Ingredient,TableHistory)
 from django.conf import settings
 from datetime import timedelta
 from django.utils import timezone
 import datetime
 from decimal import Decimal
+from django.db import transaction
+
 
 
 
@@ -207,7 +211,7 @@ class PendingRequestsCountView(APIView):
        
 def table_redirect_view(request, table_number):
     table = get_object_or_404(Table, table_number=table_number)
-    frontend_url = f"http://localhost:3001/table/{table.table_number}"
+    frontend_url = f"http://localhost:3001/customer/dashboard?table={table.table_number}"
     return redirect(frontend_url)
 
 @api_view(['GET'])
@@ -235,9 +239,7 @@ class StaffActionView(APIView):
         user = User.objects.filter(id=pk, role__in=['kitchen', 'waiter'], is_approved_by_admin=True).first()
         if not user:
             return Response({"error": "Approved staff not found"}, status=status.HTTP_404_NOT_FOUND)
-
         action = request.data.get("action")
-
         if action == "block":
             user.is_blocked = True
             user.save()
@@ -264,7 +266,6 @@ class MenuItemAPIView(APIView):
 
     def get(self, request):
         queryset = MenuItem.objects.all().order_by('-created_at')
-
         category = request.query_params.get("category")
         item_type = request.query_params.get("type")
         available = request.query_params.get("available")
@@ -291,7 +292,6 @@ class MenuItemAPIView(APIView):
 
 class MenuItemDetailAPIView(APIView):
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
-
     def get_permissions(self):
         if self.request.method == "GET":
             return [permissions.AllowAny()]
@@ -334,7 +334,6 @@ class MenuItemDetailAPIView(APIView):
 
 class CartAPIView(APIView):
     permission_classes = [permissions.AllowAny]
-
     def get_cart(self, table_number):
         """Ensure every table has its own cart."""
         table = get_object_or_404(Table, table_number=table_number)
@@ -523,12 +522,13 @@ class OrderAPIView(APIView):
     def post(self, request):
         """
         Convert Cart → Order and decrease stock for menu items.
+        Check stock availability before placing the order.
         """
         table_number = request.data.get("table_number")
         if not table_number:
             return Response(
                 {"error": "Missing table_number"},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         table = get_object_or_404(Table, table_number=table_number)
@@ -538,9 +538,17 @@ class OrderAPIView(APIView):
         if not cart_items.exists():
             return Response(
                 {"error": "Cart is empty"},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
-
+        for item in cart_items:
+            if item.menu_item and item.menu_item.stock is not None:
+                if item.menu_item.stock < item.quantity:
+                    return Response(
+                        {
+                            "error": f"Not enough stock for '{item.menu_item.name}'. Only {item.menu_item.stock} left."
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
         order = Order.objects.create(table=table, status="pending")
         total = Decimal("0.00")
 
@@ -548,13 +556,7 @@ class OrderAPIView(APIView):
             if item.menu_item:
                 menu_item = item.menu_item
                 subtotal = Decimal(menu_item.price) * item.quantity
-
                 if menu_item.stock is not None:
-                    if menu_item.stock < item.quantity:
-                        return Response(
-                            {"error": f"Not enough stock for {menu_item.name}. Only {menu_item.stock} left."},
-                            status=status.HTTP_400_BAD_REQUEST
-                        )
                     menu_item.stock -= item.quantity
                     menu_item.save()
 
@@ -591,7 +593,9 @@ class OrderAPIView(APIView):
                 "message": f"Order placed successfully for Table {table_number}",
                 "order": {
                     **serializer.data,
-                    "expected_ready_time": expected_ready_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "expected_ready_time": expected_ready_time.strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    ),
                 },
             },
             status=status.HTTP_201_CREATED,
@@ -891,26 +895,19 @@ class TableListAPIView(APIView):
         tables = Table.objects.all().order_by("table_number")
         serializer = TableSerializer(tables, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
-    
-    
+        
 class WaiterRequestsByTableAPIView(APIView):
     """
     Returns all waiter requests for a specific table number.
     Example: GET /waiter/requests/5/
     """
-    
     permission_classes = [permissions.AllowAny]
+
     def get(self, request, table_number):
         requests = WaiterRequest.objects.filter(table__table_number=table_number).order_by('-created_at')
-
-        if not requests.exists():
-            return Response(
-                {"message": f"No requests found for Table {table_number}"},
-                status=status.HTTP_404_NOT_FOUND
-            )
-
         serializer = WaiterRequestSerializer(requests, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
 
     
 @api_view(['PATCH'])
@@ -933,7 +930,6 @@ def occupy_table(request, table_number):
             {"error": f"Table {table_number} not found"},
             status=status.HTTP_404_NOT_FOUND
         )
-
 
 @api_view(['PATCH'])
 @permission_classes([permissions.AllowAny])
@@ -1155,4 +1151,62 @@ def generate_custom_dish_image(custom_dish):
         print("Image generation failed:", e)
         return None
     
-    
+class ClearTableDataAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    @transaction.atomic
+    def post(self, request, table_number):
+        try:
+            table = Table.objects.get(table_number=table_number)
+            cart_data = [
+                {
+                    "item_name": item.menu_item.name if item.menu_item else item.custom_dish.name,
+                    "quantity": item.quantity,
+                    "subtotal": float(item.subtotal),
+                    "is_custom": item.custom_dish is not None
+                } for cart in Cart.objects.filter(table=table) for item in cart.items.all()
+            ]
+
+            order_data = [
+                {
+                    "item_name": item.menu_item.name if item.menu_item else item.custom_dish.name,
+                    "quantity": item.quantity,
+                    "subtotal": float(item.subtotal),
+                    "is_custom": item.custom_dish is not None
+                } for order in Order.objects.filter(table=table) for item in order.items.all()
+            ]
+
+            request_data = [
+                {
+                    "type": req.type,
+                    "description": req.description,
+                    "status": req.status
+                } for req in WaiterRequest.objects.filter(table=table)
+            ]
+
+            TableHistory.objects.create(
+                table=table,
+                status="available",
+                changed_by=request.user,
+                snapshot={
+                    "cart": cart_data,
+                    "orders": order_data,
+                    "requests": request_data
+                }
+            )
+
+            Cart.objects.filter(table=table).delete()
+            Order.objects.filter(table=table).delete()
+            WaiterRequest.objects.filter(table=table).delete()
+            table.status = "available"
+            table.save()
+
+            return Response(
+                {"message": f"Table {table.table_number} cleared and archived."},
+                status=status.HTTP_200_OK
+            )
+
+        except Table.DoesNotExist:
+            return Response({"error": "Table not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

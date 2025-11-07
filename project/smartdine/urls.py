@@ -17,7 +17,7 @@ from .views import (
     FeedbackAPIView,
     # --- Waiter Features ---
     WaiterRequestAPIView, WaiterRequestListAPIView, WaiterRequestUpdateAPIView,
-    WaiterRequestsByTableAPIView, ReadyOrdersAPIView, MarkOrderServedAPIView,
+    WaiterRequestsByTableAPIView, ReadyOrdersAPIView, MarkOrderServedAPIView,ClearTableDataAPIView,
     # --- Kitchen ---
     KitchenOrdersAPIView, UpdateOrderStatusAPIView,
     # --- Custom Dish (AI / Builder Section) ---
@@ -100,6 +100,8 @@ urlpatterns = [
     path('waiter/orders/ready/', ReadyOrdersAPIView.as_view(), name='waiter-ready-orders'),
     path('waiter/orders/<int:order_id>/served/', MarkOrderServedAPIView.as_view(), name='waiter-mark-served'),
     path('waiter/requests/<int:table_number>/', WaiterRequestsByTableAPIView.as_view(), name='waiter-requests-by-table'),
+    path('waiter/tables/clear/<int:table_number>/', ClearTableDataAPIView.as_view(), name='clear-table'),
+
 
     # ==========================
     # 🧠 CUSTOM DISH BUILDER

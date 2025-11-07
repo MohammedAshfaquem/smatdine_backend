@@ -9,6 +9,7 @@ from django.core.files import File
 from datetime import timedelta
 from django.utils import timezone
 from decimal import Decimal
+from django.conf import settings  # <-- important
 
 
 class UserManager(BaseUserManager):
@@ -84,6 +85,13 @@ class User(AbstractBaseUser, PermissionsMixin):
         self.password_reset_sent_at = None
         self.save(update_fields=["password_reset_token", "password_reset_sent_at"])
 
+
+from django.db import models
+from django.core.files import File
+from io import BytesIO
+import qrcode
+from django.conf import settings  # <-- important
+
 class Table(models.Model):
     STATUS_CHOICES = [
         ('available', 'Available'),
@@ -101,22 +109,25 @@ class Table(models.Model):
     def save(self, *args, **kwargs):
         """
         Save the Table instance, then generate and attach a QR code image.
-        The QR will contain a link to the frontend table page.
+        The QR will contain a link to the frontend customer dashboard.
         """
         super().save(*args, **kwargs)
 
-        qr_data = f"http://localhost:3001/table/{self.table_number}/"
+        frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:3001")
+        qr_data = f"{frontend_url}/customer/dashboard?table={self.table_number}"
 
-        # Create QR image
         qr_img = qrcode.make(qr_data)
         buffer = BytesIO()
         qr_img.save(buffer, format="PNG")
         file_name = f"table_{self.table_number}_qr.png"
+
         self.qr_code.save(file_name, File(buffer), save=False)
         super().save(update_fields=['qr_code'])
 
     def __str__(self):
         return f"Table {self.table_number}"
+
+
 
 class MenuItem(models.Model):
     CATEGORY_CHOICES = [
@@ -379,3 +390,14 @@ class CustomDishIngredient(models.Model):
     def __str__(self):
         return self.ingredient.name
     
+    
+class TableHistory(models.Model):
+    table = models.ForeignKey("Table", on_delete=models.CASCADE, related_name="history")
+    status = models.CharField(max_length=20, choices=[('available','Available'), ('occupied','Occupied')])
+    changed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
+    timestamp = models.DateTimeField(auto_now_add=True)
+
+    snapshot = models.JSONField(default=dict)  
+
+    def __str__(self):
+        return f"Table {self.table.table_number} cleared at {self.timestamp}"

@@ -11,10 +11,15 @@ from .models import (
     WaiterRequest,
     Feedback,
     Ingredient,
-    Base,CustomDish,CustomDishIngredient,
+    Base,
+    CustomDish,
+    CustomDishIngredient,
+    TableHistory
 )
 
-
+# -------------------------
+# User Admin
+# -------------------------
 @admin.register(User)
 class UserAdmin(admin.ModelAdmin):
     list_display = (
@@ -29,6 +34,9 @@ class UserAdmin(admin.ModelAdmin):
     ordering = ("id",)
 
 
+# -------------------------
+# Menu Item Admin
+# -------------------------
 @admin.register(MenuItem)
 class MenuItemAdmin(admin.ModelAdmin):
     list_display = (
@@ -37,50 +45,74 @@ class MenuItemAdmin(admin.ModelAdmin):
         "category",
         "type",
         "price",
-        "stock",      
+        "stock",
         "availability",
         "preparation_time",
         "created_at",
         "updated_at",
     )
-    list_filter = (
-        "category",
-        "type",
-        "availability",
-    )
+    list_filter = ("category", "type", "availability")
     search_fields = ("name",)
     list_editable = ("price", "stock", "availability")
 
+
+# -------------------------
+# Cart & CartItem Admin
+# -------------------------
+class CartItemInline(admin.TabularInline):
+    model = CartItem
+    extra = 0
+    readonly_fields = ("subtotal",)
 
 
 @admin.register(Cart)
 class CartAdmin(admin.ModelAdmin):
     list_display = ("id", "table", "created_at", "updated_at")
+    inlines = [CartItemInline]
 
 
 @admin.register(CartItem)
 class CartItemAdmin(admin.ModelAdmin):
-    list_display = ("id", "cart", "menu_item", "quantity")
+    list_display = ("id", "cart", "menu_item", "custom_dish", "quantity", "subtotal")
+    readonly_fields = ("subtotal",)
+
+
+# -------------------------
+# Order & OrderItem Admin
+# -------------------------
+class OrderItemInline(admin.TabularInline):
+    model = OrderItem
+    extra = 0
+    readonly_fields = ("subtotal",)
 
 
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
-    list_display = ("id", "table", "total", "status", "created_at", "updated_at")
+    list_display = ("id", "table", "total", "status", "estimated_time", "created_at", "updated_at")
     list_filter = ("status",)
     search_fields = ("table__table_number",)
+    inlines = [OrderItemInline]
 
 
 @admin.register(OrderItem)
 class OrderItemAdmin(admin.ModelAdmin):
-    list_display = ("id", "order", "menu_item", "quantity", "price")
+    list_display = ("id", "order", "menu_item", "custom_dish", "quantity", "price", "subtotal")
+    readonly_fields = ("subtotal",)
 
 
+# -------------------------
+# WaiterRequest Admin
+# -------------------------
 @admin.register(WaiterRequest)
 class WaiterRequestAdmin(admin.ModelAdmin):
     list_display = ("id", "table", "type", "status", "created_at", "updated_at")
     list_filter = ("type", "status")
+    search_fields = ("table__table_number", "description")
 
 
+# -------------------------
+# Table Admin
+# -------------------------
 @admin.register(Table)
 class TableAdmin(admin.ModelAdmin):
     list_display = ('id', 'table_number', 'seats', 'status', 'qr_code_preview', 'created_at', 'updated_at')
@@ -97,17 +129,26 @@ class TableAdmin(admin.ModelAdmin):
 
     qr_code_preview.short_description = "QR Code"
 
+
+# -------------------------
+# Feedback Admin
+# -------------------------
 @admin.register(Feedback)
 class FeedbackAdmin(admin.ModelAdmin):
     list_display = ('id', 'order', 'food_rating', 'service_rating', 'comments', 'created_at')
     list_filter = ('food_rating', 'service_rating', 'created_at')
     search_fields = ('order__id', 'comments')
     ordering = ('-created_at',)
-    
+
+
+# -------------------------
+# Base & Ingredient Admin
+# -------------------------
 @admin.register(Base)
 class BaseAdmin(admin.ModelAdmin):
     list_display = ('name', 'price')
     search_fields = ('name',)
+
 
 @admin.register(Ingredient)
 class IngredientAdmin(admin.ModelAdmin):
@@ -115,21 +156,33 @@ class IngredientAdmin(admin.ModelAdmin):
     list_filter = ('category',)
     search_fields = ('name',)
 
+
+# -------------------------
+# Custom Dish & Ingredients Admin
+# -------------------------
 class CustomDishIngredientInline(admin.TabularInline):
     model = CustomDishIngredient
     extra = 1
 
+
 @admin.register(CustomDish)
 class CustomDishAdmin(admin.ModelAdmin):
     list_display = ['id', 'name', 'base', 'get_ingredients', 'total_price', 'created_at']
+    inlines = [CustomDishIngredientInline]
 
     def get_ingredients(self, obj):
         return ", ".join([i.ingredient.name for i in obj.dish_ingredients.all()])
     get_ingredients.short_description = "Ingredients"
 
 
-
 @admin.register(CustomDishIngredient)
 class CustomDishIngredientAdmin(admin.ModelAdmin):
     list_display = ('custom_dish', 'ingredient', 'quantity')
+    
 
+@admin.register(TableHistory)
+class TableHistoryAdmin(admin.ModelAdmin):
+    list_display = ("id", "table", "status", "changed_by", "timestamp")
+    readonly_fields = ("snapshot", "timestamp")
+    search_fields = ("table__table_number",)
+    list_filter = ("status", "timestamp")

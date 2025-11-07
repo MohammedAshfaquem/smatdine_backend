@@ -3,7 +3,7 @@ from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.contrib.auth.hashers import make_password
 from rest_framework_simplejwt.tokens import RefreshToken
-from .models import Table,MenuItem,Cart,CartItem,Order,OrderItem,Feedback,WaiterRequest,Base,Ingredient,CustomDishIngredient,CustomDish 
+from .models import Table,MenuItem,Cart,CartItem,Order,OrderItem,TableHistory,Feedback,WaiterRequest,Base,Ingredient,CustomDishIngredient,CustomDish 
 
 User = get_user_model()
 
@@ -221,3 +221,15 @@ class OrderSerializer(serializers.ModelSerializer):
     def get_table_number(self, obj):
         """Return table_number from related Table model"""
         return obj.table.table_number if obj.table else None
+
+class TableHistorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TableHistory
+        fields = [
+            "id",
+            "table",
+            "status",
+            "changed_by",
+            "timestamp",
+            "data_snapshot" 
+        ]
