@@ -86,12 +86,6 @@ class User(AbstractBaseUser, PermissionsMixin):
         self.save(update_fields=["password_reset_token", "password_reset_sent_at"])
 
 
-from django.db import models
-from django.core.files import File
-from io import BytesIO
-import qrcode
-from django.conf import settings  # <-- important
-
 class Table(models.Model):
     STATUS_CHOICES = [
         ('available', 'Available'),
@@ -162,6 +156,10 @@ class MenuItem(models.Model):
     preparation_time = models.PositiveIntegerField(default=10) 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    min_stock = models.PositiveIntegerField(
+        default=5,
+        help_text="Minimum stock before triggering low stock alert"
+    )
 
     def __str__(self):
         return f"{self.name} ({self.type})"
@@ -169,6 +167,10 @@ class MenuItem(models.Model):
     def is_available(self):
         """Check if item can be ordered based on stock and availability."""
         return self.availability and self.stock > 0
+    
+    def is_low_stock(self):
+        """Check if stock is below minimum threshold."""
+        return self.stock <= self.min_stock
 
 class Cart(models.Model):
     table = models.ForeignKey(Table, on_delete=models.CASCADE, related_name="cart")
@@ -218,6 +220,8 @@ class Order(models.Model):
     estimated_time = models.PositiveIntegerField(default=0)  # in minutes
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
+    started_preparing_at = models.DateTimeField(null=True, blank=True)  # ✅ NEW
+
 
     def __str__(self):
         return f"Order {self.id} - Table {self.table.table_number}"

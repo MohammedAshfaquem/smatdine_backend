@@ -23,6 +23,10 @@ from .views import (
     # --- Custom Dish (AI / Builder Section) ---
     BaseListView, IngredientListView, CreateCustomDishView,
     CustomDishListByTableView, CustomDishListAllView, ReorderCustomDishView,
+    
+    
+    
+    chat_with_gemini
 )
 
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
@@ -79,6 +83,8 @@ urlpatterns = [
     path('order/place/', OrderAPIView.as_view(), name='place-order'),
     path('orders/<int:table_id>/', TableOrdersAPIView.as_view(), name='table-orders'),
     path('order/<int:order_id>/', OrderDetailAPIView.as_view(), name='order-detail'),
+    path("orders/<int:order_id>/status/", UpdateOrderStatusAPIView.as_view(), name="update-order-status"),
+
 
     # ==========================
     # 💬 FEEDBACK
@@ -112,4 +118,8 @@ urlpatterns = [
     path('custom-dishes/<int:table_id>/', CustomDishListByTableView.as_view(), name='custom-dish-list-by-table'),
     path('custom-dishes/', CustomDishListAllView.as_view(), name='custom-dish-list-all'),
     path('custom-dish/<int:custom_dish_id>/reorder/', ReorderCustomDishView.as_view(), name='custom-dish-reorder'),
+    
+    
+    
+    path("api/chat/", chat_with_gemini, name="chat_with_gemini"),
 ]

@@ -80,10 +80,19 @@ class StaffSerializer(serializers.ModelSerializer):
         model = User
         fields = ['id', 'name', 'email', 'role', 'is_active', 'is_blocked']
                
+
 class MenuItemSerializer(serializers.ModelSerializer):
+    # Computed field to detect if stock is at or below minimum
+    is_low_stock = serializers.SerializerMethodField()
+
     class Meta:
         model = MenuItem
-        fields = "__all__"
+        fields = "__all__"  # keeps all your existing fields
+        read_only_fields = ["created_at", "updated_at", "is_low_stock"]
+
+    def get_is_low_stock(self, obj):
+        # Return True if stock is less than or equal to min_stock
+        return obj.stock <= getattr(obj, "min_stock", 0)
 
 class FeedbackSerializer(serializers.ModelSerializer):
     class Meta:
@@ -183,23 +192,19 @@ class CartSerializer(serializers.ModelSerializer):
         fields = ['id', 'table', 'items', 'total_amount', 'created_at', 'updated_at']
         
 class OrderItemSerializer(serializers.ModelSerializer):
-    menu_item_name = serializers.SerializerMethodField()
+    menu_item = MenuItemSerializer(read_only=True)  # 🔹 Nested serializer for full menu details
     custom_dish = CustomDishSerializer(read_only=True)
 
     class Meta:
         model = OrderItem
         fields = [
             "id",
-            "menu_item",
-            "menu_item_name",
+            "menu_item",       # now full object, not just ID
             "custom_dish",
             "quantity",
             "price",
             "subtotal",
         ]
-
-    def get_menu_item_name(self, obj):
-        return obj.menu_item.name if obj.menu_item else None
 
 class OrderSerializer(serializers.ModelSerializer):
     items = OrderItemSerializer(many=True, read_only=True)
@@ -209,18 +214,20 @@ class OrderSerializer(serializers.ModelSerializer):
         model = Order
         fields = [
             "id",
-            "table_number", 
+            "table_number",
             "status",
             "total",
             "estimated_time",
             "created_at",
             "updated_at",
+            "started_preparing_at",  # ✅ added this field
             "items",
         ]
 
     def get_table_number(self, obj):
         """Return table_number from related Table model"""
         return obj.table.table_number if obj.table else None
+
 
 class TableHistorySerializer(serializers.ModelSerializer):
     class Meta:

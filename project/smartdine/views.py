@@ -25,10 +25,10 @@ from django.utils import timezone
 import datetime
 from decimal import Decimal
 from django.db import transaction
-
-
-
-
+from google import genai
+import re
+import os
+import difflib
 
 
 User = get_user_model()
@@ -265,10 +265,11 @@ class MenuItemAPIView(APIView):
         return [permissions.IsAuthenticated()]
 
     def get(self, request):
-        queryset = MenuItem.objects.all().order_by('-created_at')
+        queryset = MenuItem.objects.all()
         category = request.query_params.get("category")
         item_type = request.query_params.get("type")
         available = request.query_params.get("available")
+        low_stock = request.query_params.get("low_stock")
 
         if category:
             queryset = queryset.filter(category__iexact=category)
@@ -276,9 +277,24 @@ class MenuItemAPIView(APIView):
             queryset = queryset.filter(type__iexact=item_type)
         if available:
             queryset = queryset.filter(availability=(available.lower() == "true"))
+        if low_stock and low_stock.lower() == "true":
+            queryset = queryset.filter(stock__lte=F('min_stock'))
+
+        # Order by stock (low first) then created_at (oldest first)
+        queryset = queryset.order_by('stock', 'created_at')
 
         serializer = MenuItemSerializer(queryset, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        serializer = MenuItemSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(
+                {"message": "Menu item created successfully", "data": serializer.data},
+                status=status.HTTP_201_CREATED,
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def post(self, request):
         serializer = MenuItemSerializer(data=request.data)
@@ -396,7 +412,6 @@ class CartAPIView(APIView):
                 },
             )
 
-        # Update quantity if already exists
         if not created:
             new_quantity = cart_item.quantity + quantity
             if cart_item.menu_item and cart_item.menu_item.stock is not None:
@@ -421,7 +436,6 @@ class CartAPIView(APIView):
             status=status.HTTP_201_CREATED,
         )
 
-    # 🔄 Update quantity
     def patch(self, request):
         table_number = request.data.get("table_number")
         item_id = request.data.get("item_id")
@@ -444,7 +458,6 @@ class CartAPIView(APIView):
         cart_item.save()
         return Response({"message": f"Quantity updated for Table {cart.table.table_number}"}, status=status.HTTP_200_OK)
 
-    # ❌ Remove item
     def delete(self, request, item_id):
         table_number = request.query_params.get("table_number")
         if not table_number:
@@ -455,7 +468,6 @@ class CartAPIView(APIView):
         cart_item.delete()
         return Response({"message": f"Item removed from Table {cart.table.table_number}"}, status=status.HTTP_204_NO_CONTENT)
 
-    # 🔍 Get quantity of a single item in cart
     def get_item_quantity(self, request, table_number, menu_item_id=None, custom_dish_id=None):
         cart = self.get_cart(table_number)
         if menu_item_id:
@@ -522,7 +534,7 @@ class OrderAPIView(APIView):
     def post(self, request):
         """
         Convert Cart → Order and decrease stock for menu items.
-        Check stock availability before placing the order.
+        Checks stock availability before placing the order.
         """
         table_number = request.data.get("table_number")
         if not table_number:
@@ -540,6 +552,8 @@ class OrderAPIView(APIView):
                 {"error": "Cart is empty"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        # ✅ Check stock availability first
         for item in cart_items:
             if item.menu_item and item.menu_item.stock is not None:
                 if item.menu_item.stock < item.quantity:
@@ -549,13 +563,21 @@ class OrderAPIView(APIView):
                         },
                         status=status.HTTP_400_BAD_REQUEST,
                     )
-        order = Order.objects.create(table=table, status="pending")
+
+        # ✅ Create a new pending order (countdown starts when it becomes 'preparing')
+        order = Order.objects.create(
+            table=table,
+            status="pending",
+        )
+
         total = Decimal("0.00")
 
+        # ✅ Move all cart items into the order
         for item in cart_items:
             if item.menu_item:
                 menu_item = item.menu_item
                 subtotal = Decimal(menu_item.price) * item.quantity
+
                 if menu_item.stock is not None:
                     menu_item.stock -= item.quantity
                     menu_item.save()
@@ -580,14 +602,18 @@ class OrderAPIView(APIView):
                 )
                 total += subtotal
 
+        # ✅ Update total and estimated time (via model logic)
         order.total = total
         order.update_total_and_eta()
 
+        # Calculate expected ready time for display
         expected_ready_time = timezone.now() + timedelta(minutes=order.estimated_time)
 
+        # ✅ Clear cart after placing order
         cart_items.delete()
 
         serializer = OrderSerializer(order)
+
         return Response(
             {
                 "message": f"Order placed successfully for Table {table_number}",
@@ -601,6 +627,28 @@ class OrderAPIView(APIView):
             status=status.HTTP_201_CREATED,
         )
 
+class UpdateOrderStatusAPIView(APIView):
+    def patch(self, request, order_id):
+        try:
+            order = Order.objects.get(id=order_id)
+        except Order.DoesNotExist:
+            return Response({"error": "Order not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        new_status = request.data.get("status")
+        if not new_status:
+            return Response({"error": "Missing status field"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # ✅ Record preparation start time
+        if new_status == "preparing" and not order.started_preparing_at:
+            order.started_preparing_at = timezone.now()
+
+        order.status = new_status
+        order.save()
+
+        return Response(
+            {"message": f"Order {order.id} status updated to {new_status}"},
+            status=status.HTTP_200_OK,
+        )
 class TableOrdersAPIView(APIView):
     permission_classes = [permissions.AllowAny]
 
@@ -1210,3 +1258,165 @@ class ClearTableDataAPIView(APIView):
             return Response({"error": "Table not found"}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        
+
+
+
+# ============================================================
+# Keywords & Off-topic Detection
+# ============================================================
+
+FOOD_KEYWORDS = [
+    # General
+    "food", "meal", "dish", "menu", "order", "recipe", "ingredient",
+    "spice", "sauce", "starter", "dessert", "snack", "drink", "beverage",
+    "juice", "coffee", "tea", "breakfast", "lunch", "dinner", "brunch",
+
+    # Nutrition & diet
+    "diet", "diet plan", "healthy", "health", "nutrition", "nutrient",
+    "vitamin", "protein", "carb", "fat", "fiber", "calorie", "balanced",
+    "weight loss", "meal plan", "fitness", "detox", "keto", "paleo", "vegan",
+    "vegetarian", "gluten", "allergy", "low calorie", "low carb", "high protein",
+
+    # Restaurant
+    "restaurant", "table", "waiter", "bill", "chef", "special",
+    "recommend", "menu item", "order now", "spicy"
+]
+
+OFFTOPIC_PATTERNS = re.compile(
+    r"\b(politics|president|religion|war|sex|porn|crypto|stock|investment|lawsuit|celebrity|movie|game)\b",
+    re.IGNORECASE,
+)
+
+# ============================================================
+# Helper Functions
+# ============================================================
+
+def looks_food_related(text: str) -> bool:
+    """Detect if the message is food-related, with fuzzy typo tolerance."""
+    text_l = text.lower()
+    words = re.findall(r"\b\w+\b", text_l)
+
+    # Direct keyword match
+    for kw in FOOD_KEYWORDS:
+        if kw in text_l:
+            return True
+
+    # Fuzzy typo match
+    for word in words:
+        close = difflib.get_close_matches(word, FOOD_KEYWORDS, n=1, cutoff=0.8)
+        if close:
+            return True
+
+    # Regex fallback
+    if re.search(r"\b(cook|eat|restaurant|nutrition|diet|food|menu|dish|meal|ingredient|health|protein|fruit|vegetable|spicy)\b", text_l):
+        return True
+    return False
+
+def cleanup_response(resp_text: str) -> str:
+    """Cleans Gemini's raw output for user-friendly display."""
+    if not resp_text:
+        return "Sorry, I couldn’t generate a response."
+
+    if OFFTOPIC_PATTERNS.search(resp_text):
+        return "I can only help with food, health, nutrition, and menu-related questions."
+
+    text = resp_text
+    text = re.sub(r"(?is)(okay!|sure!|to give you the best recommendations|could you tell me more|once I know).*", "", text)
+    text = re.sub(r"[*_#>`~-]+", "", text)
+    text = re.sub(r"\n{2,}", "\n", text)
+    text = re.sub(r"\s{2,}", " ", text).strip()
+
+    if len(text.split()) > 100:
+        text = " ".join(text.split()[:100]) + "..."
+    return text
+
+# ============================================================
+# Dynamic DB Context Fetching
+# ============================================================
+
+def find_relevant_items(question: str):
+    """Return relevant dishes or ingredients based on context keywords."""
+    question = question.lower()
+    dishes = []
+    ingredients = []
+
+    # --- Spicy ---
+    if "spicy" in question:
+        dishes = list(MenuItem.objects.filter(spice_level__gte=2, availability=True).values_list("name", flat=True))
+        ingredients = list(Ingredient.objects.filter(category="spice").values_list("name", flat=True))
+
+    # --- Diet / Healthy ---
+    elif "diet" in question or "healthy" in question:
+        bases = list(Base.objects.all().values("name", "description"))
+        ingredient_objs = Ingredient.objects.filter(category__in=["fruit", "green", "citrus", "extra", "sweetener"]).order_by("category", "name")
+        ingredients = [i.name for i in ingredient_objs]
+
+        # Combine bases with 2-3 ingredients randomly for suggestions
+        diet_suggestions = []
+        for base in bases:
+            combo = f"{base['name']} with " + ", ".join(ingredients[:3])
+            diet_suggestions.append(combo)
+        dishes = diet_suggestions
+
+    # --- Dessert / Sweet ---
+    elif "dessert" in question or "sweet" in question:
+        dishes = list(MenuItem.objects.filter(category="dessert", availability=True).values_list("name", flat=True))
+        ingredients = list(Ingredient.objects.filter(category="sweetener").values_list("name", flat=True))
+
+    # --- Fallback ---
+    if not dishes and not ingredients:
+        return None
+
+    return {
+        "dishes": dishes,
+        "ingredients": ingredients,
+    }
+
+# ============================================================
+# API Endpoint
+# ============================================================
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def chat_with_gemini(request):
+    """Handles SmartDine AI chat requests."""
+    question = (request.data.get("message") or "").strip()
+    if not question:
+        return Response({"error": "Empty message"}, status=400)
+
+    if not looks_food_related(question):
+        return Response({"reply": "I can only help with food, health, nutrition, and menu-related questions."})
+
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return Response({"error": "Gemini API key not set"}, status=500)
+
+    context_data = find_relevant_items(question)
+    base_context = ""
+    if context_data:
+        dishes = ", ".join(context_data.get("dishes", [])) or "none found"
+        ingredients = ", ".join(context_data.get("ingredients", [])) or "none found"
+        base_context = f"Related dishes: {dishes}. Ingredients you can use: {ingredients}."
+
+    try:
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=[{
+                "parts": [{
+                    "text": (
+                        "You are SmartDine’s AI assistant. Only answer questions about food, diet, health, or restaurant menus. "
+                        "Keep responses short, natural, and under 100 words. Never use markdown or bullet lists.\n\n"
+                        f"{base_context}\nUser: {question}"
+                    )
+                }]
+            }],
+        )
+
+        reply = cleanup_response(response.text)
+        return Response({"reply": reply})
+
+    except Exception as e:
+        return Response({"error": "Gemini API request failed", "details": str(e)}, status=502)
