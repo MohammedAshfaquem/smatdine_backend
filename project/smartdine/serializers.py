@@ -82,7 +82,6 @@ class StaffSerializer(serializers.ModelSerializer):
                
 
 class MenuItemSerializer(serializers.ModelSerializer):
-    # Computed field to detect if stock is at or below minimum
     is_low_stock = serializers.SerializerMethodField()
 
     class Meta:

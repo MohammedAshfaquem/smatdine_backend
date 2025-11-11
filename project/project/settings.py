@@ -136,8 +136,10 @@ CSRF_TRUSTED_ORIGINS = [
     "http://127.0.0.1:3001",
 ]
 LANGUAGE_CODE = "en-us"
-TIME_ZONE = "UTC"
+
+TIME_ZONE = "Asia/Kolkata"
 USE_I18N = True
 USE_TZ = True
+
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

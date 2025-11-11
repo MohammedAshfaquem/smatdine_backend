@@ -21,6 +21,7 @@ from .models import (Table,MenuItem,CartItem,Cart,OrderItem,Order,
                      CustomDishIngredient,Ingredient,TableHistory)
 from django.conf import settings
 from datetime import timedelta
+from datetime import timezone as pytimezone
 from django.utils import timezone
 import datetime
 from decimal import Decimal
@@ -627,6 +628,120 @@ class OrderAPIView(APIView):
             status=status.HTTP_201_CREATED,
         )
 
+
+        
+
+
+from datetime import datetime, timedelta, timezone as pytimezone
+from django.utils import timezone
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status, permissions
+from .models import Order
+from .serializers import OrderSerializer
+
+
+class OrdersListAPIView(APIView):
+    """
+    Unified endpoint for all order listings.
+
+    Filters:
+      - status=<pending|preparing|ready|served|all>
+      - date=today|week|YYYY-MM-DD
+      - group_by=hourly (2-hour bar chart grouping)
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        status_param = request.query_params.get("status", "").lower().strip()
+        date_param = request.query_params.get("date", "").lower().strip()
+        group_by = request.query_params.get("group_by", "").lower().strip()
+
+        queryset = (
+            Order.objects.all()
+            .select_related("table")
+            .prefetch_related("items__menu_item")
+        )
+
+        # ✅ Status filter
+        if status_param and status_param != "all":
+            valid_statuses = ["pending", "preparing", "ready", "served"]
+            if status_param in valid_statuses:
+                queryset = queryset.filter(status=status_param)
+            else:
+                return Response(
+                    {"error": f"Invalid status '{status_param}'."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        # ✅ Local time (Asia/Kolkata handled by Django settings)
+        now_local = timezone.localtime()
+        today_local = now_local.date()
+        tz_local = timezone.get_current_timezone()
+
+        # ✅ Determine date range
+        if date_param == "today" or not date_param:
+            target_date = today_local
+        elif date_param == "week":
+            start_of_week = today_local - timedelta(days=today_local.weekday())
+            start_of_week = datetime.combine(start_of_week, datetime.min.time(), tzinfo=pytimezone.utc)
+            queryset = queryset.filter(created_at__gte=start_of_week)
+            queryset = queryset.order_by("-created_at")
+            serializer = OrderSerializer(queryset, many=True)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        else:
+            try:
+                target_date = datetime.strptime(date_param, "%Y-%m-%d").date()
+            except ValueError:
+                return Response(
+                    {"error": "Invalid date format. Use YYYY-MM-DD."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        # ✅ Filter for that day (UTC safe)
+        start_of_day = datetime.combine(target_date, datetime.min.time(), tzinfo=pytimezone.utc)
+        end_of_day = start_of_day + timedelta(days=1)
+        queryset = queryset.filter(
+            created_at__gte=start_of_day,
+            created_at__lt=end_of_day,
+        )
+
+        # ✅ Hourly grouping with local timezone
+        if group_by == "hourly":
+            slots = [(9, 11), (11, 13), (13, 15), (15, 17), (17, 19)]
+            result = []
+
+            for start_hour, end_hour in slots:
+                # Define times in local timezone (Asia/Kolkata)
+                start_time_local = datetime.combine(target_date, datetime.min.time()).replace(
+                    hour=start_hour, tzinfo=tz_local
+                )
+                end_time_local = datetime.combine(target_date, datetime.min.time()).replace(
+                    hour=end_hour, tzinfo=tz_local
+                )
+
+                # Convert to UTC for DB comparison
+                start_time_utc = start_time_local.astimezone(pytimezone.utc)
+                end_time_utc = end_time_local.astimezone(pytimezone.utc)
+
+                count = queryset.filter(
+                    created_at__gte=start_time_utc,
+                    created_at__lt=end_time_utc,
+                ).count()
+
+                result.append({
+                    "label": f"{start_hour}:00-{end_hour}:00",
+                    "orders": count,
+                })
+
+            return Response(result, status=status.HTTP_200_OK)
+
+        # ✅ Default (normal list)
+        queryset = queryset.order_by("-created_at")
+        serializer = OrderSerializer(queryset, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+       
 class UpdateOrderStatusAPIView(APIView):
     def patch(self, request, order_id):
         try:
@@ -847,6 +962,42 @@ class WaiterRequestListAPIView(APIView):
             for r in requests
         ]
         return Response(data, status=status.HTTP_200_OK)
+    
+class ServiceRequestAPIView(APIView):
+    """
+    Fetch service (waiter) requests for both roles:
+    - Waiter → only today's requests
+    - Admin → all or date-filtered requests
+    """
+    permission_classes = [permissions.AllowAny]  # Change to IsAuthenticated if needed
+
+    def get(self, request):
+        user_role = request.query_params.get("role", "waiter")  # ?role=admin or waiter
+        date_param = request.query_params.get("date", None)
+        today = timezone.localdate()
+
+        queryset = WaiterRequest.objects.all()
+
+        # 🔹 Role-based filtering
+        if user_role == "waiter":
+            queryset = queryset.filter(created_at__date=today)
+        elif date_param:  # Admin filter by specific date if provided
+            queryset = queryset.filter(created_at__date=date_param)
+
+        queryset = queryset.order_by("-created_at")
+
+        data = [
+            {
+                "id": r.id,
+                "table_number": r.table.table_number,
+                "type": r.type,
+                "status": r.status,
+                "created_at": r.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                "updated_at": r.updated_at.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            for r in queryset
+        ]
+        return Response(data, status=status.HTTP_200_OK)
 
 class WaiterRequestUpdateAPIView(APIView):
     """
@@ -917,14 +1068,7 @@ class UpdateOrderStatusAPIView(APIView):
         serializer = OrderSerializer(order)
         return Response(serializer.data, status=status.HTTP_200_OK)
     
-class ReadyOrdersAPIView(APIView):
-    """List all ready orders for waiters to serve."""
-    permission_classes = [permissions.AllowAny]
 
-    def get(self, request):
-        ready_orders = Order.objects.filter(status="ready").prefetch_related("items", "table")
-        serializer = OrderSerializer(ready_orders, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
 
 class MarkOrderServedAPIView(APIView):
     """Mark an order as served by the waiter."""
