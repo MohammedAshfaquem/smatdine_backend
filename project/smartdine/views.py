@@ -20,6 +20,7 @@ from .models import (Table,MenuItem,CartItem,Cart,OrderItem,Order,
                      Feedback,WaiterRequest,Base,CustomDish,
                      CustomDishIngredient,Ingredient,TableHistory)
 from django.conf import settings
+from django.db.models import Sum, FloatField, Count,F
 from datetime import timedelta
 from datetime import timezone as pytimezone
 from django.utils import timezone
@@ -265,8 +266,16 @@ class MenuItemAPIView(APIView):
             return [permissions.AllowAny()]
         return [permissions.IsAuthenticated()]
 
-    def get(self, request):
+    def get(self, request, pk=None):
+        """Handle GET for all menu items or a single item by ID"""
+        if pk:
+            item = get_object_or_404(MenuItem, pk=pk)
+            serializer = MenuItemSerializer(item)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+
         queryset = MenuItem.objects.all()
+
+        # Optional filters
         category = request.query_params.get("category")
         item_type = request.query_params.get("type")
         available = request.query_params.get("available")
@@ -276,18 +285,18 @@ class MenuItemAPIView(APIView):
             queryset = queryset.filter(category__iexact=category)
         if item_type:
             queryset = queryset.filter(type__iexact=item_type)
-        if available:
+        if available is not None:
             queryset = queryset.filter(availability=(available.lower() == "true"))
         if low_stock and low_stock.lower() == "true":
-            queryset = queryset.filter(stock__lte=F('min_stock'))
+            queryset = queryset.filter(stock__lte=F("min_stock"))
 
-        # Order by stock (low first) then created_at (oldest first)
-        queryset = queryset.order_by('stock', 'created_at')
+        queryset = queryset.order_by("stock", "created_at")
 
         serializer = MenuItemSerializer(queryset, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request):
+        """Create new menu item"""
         serializer = MenuItemSerializer(data=request.data)
         if serializer.is_valid():
             serializer.save()
@@ -297,15 +306,39 @@ class MenuItemAPIView(APIView):
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    def post(self, request):
-        serializer = MenuItemSerializer(data=request.data)
+    def put(self, request, pk=None):
+        """Update existing menu item"""
+        if not pk:
+            return Response(
+                {"error": "Menu item ID is required for update"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        item = get_object_or_404(MenuItem, pk=pk)
+        serializer = MenuItemSerializer(item, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
             return Response(
-                {"message": "Menu item created successfully", "data": serializer.data},
-                status=status.HTTP_201_CREATED,
+                {"message": "Menu item updated successfully", "data": serializer.data},
+                status=status.HTTP_200_OK,
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, pk=None):
+        """Delete menu item by ID"""
+        if not pk:
+            return Response(
+                {"error": "Menu item ID is required for deletion"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        item = get_object_or_404(MenuItem, pk=pk)
+        item.delete()
+        return Response(
+            {"message": "Menu item deleted successfully"},
+            status=status.HTTP_204_NO_CONTENT,
+        )
+
 
 class MenuItemDetailAPIView(APIView):
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
@@ -643,12 +676,16 @@ from .serializers import OrderSerializer
 
 class OrdersListAPIView(APIView):
     """
-    Unified endpoint for all order listings.
+    Unified endpoint for order listings and sales analytics.
 
     Filters:
       - status=<pending|preparing|ready|served|all>
-      - date=today|week|YYYY-MM-DD
-      - group_by=hourly (2-hour bar chart grouping)
+      - date=today|week|YYYY-MM-DD|all
+      - all=true  → return all orders (ignores date)
+      - sales=today|week|month|year|total|custom|top_items
+      - year=YYYY (used when sales=year)
+      - start=YYYY-MM-DD&end=YYYY-MM-DD (used when sales=custom)
+      - group_by=hourly (for 2-hour bar chart grouping)
     """
 
     permission_classes = [permissions.IsAuthenticated]
@@ -657,6 +694,9 @@ class OrdersListAPIView(APIView):
         status_param = request.query_params.get("status", "").lower().strip()
         date_param = request.query_params.get("date", "").lower().strip()
         group_by = request.query_params.get("group_by", "").lower().strip()
+        show_all = request.query_params.get("all", "").lower().strip() == "true"
+        sales_param = request.query_params.get("sales", "").lower().strip()
+        year_param = request.query_params.get("year", "").strip()
 
         queryset = (
             Order.objects.all()
@@ -664,7 +704,9 @@ class OrdersListAPIView(APIView):
             .prefetch_related("items__menu_item")
         )
 
-        # ✅ Status filter
+        # ---------------------
+        # STATUS FILTER
+        # ---------------------
         if status_param and status_param != "all":
             valid_statuses = ["pending", "preparing", "ready", "served"]
             if status_param in valid_statuses:
@@ -675,18 +717,184 @@ class OrdersListAPIView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        # ✅ Local time (Asia/Kolkata handled by Django settings)
+        # ---------------------
+        # SALES ANALYTICS
+        # ---------------------
+        if sales_param:
+            now_local = timezone.localtime()
+            today_local = now_local.date()
+            start_date = None
+            end_date = None
+
+            # --- TOP 5 SOLD ITEMS ---
+            if sales_param == "top_items":
+                top_items = (
+                    OrderItem.objects.filter(order__status="served")
+                    .values(item_name=F("menu_item__name"))
+                    .annotate(
+                        quantity_sold=Sum("quantity"),
+                        revenue=Sum(F("quantity") * F("price"), output_field=FloatField()),
+                    )
+                    .order_by("-quantity_sold")[:5]
+                )
+
+                return Response(
+                    {
+                        "sales_type": "top_items",
+                        "top_5_items": list(top_items),
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+            # --- TODAY ---
+            elif sales_param == "today":
+                start_date = datetime.combine(today_local, datetime.min.time(), tzinfo=pytimezone.utc)
+                end_date = start_date + timedelta(days=1)
+
+            # --- WEEK (with daily breakdown) ---
+            elif sales_param == "week":
+                start_of_week = today_local - timedelta(days=today_local.weekday())  # Monday
+                start_date = datetime.combine(start_of_week, datetime.min.time(), tzinfo=pytimezone.utc)
+                end_date = start_date + timedelta(days=7)
+
+                # Calculate daily revenue Mon–Sun
+                daily_revenue = []
+                for i in range(7):
+                    day_start = start_date + timedelta(days=i)
+                    day_end = day_start + timedelta(days=1)
+
+                    agg = (
+                        Order.objects.filter(
+                            status="served",
+                            created_at__gte=day_start,
+                            created_at__lt=day_end,
+                        ).aggregate(
+                            total_sales=Sum("total", output_field=FloatField()),
+                            total_count=Count("id"),
+                        )
+                    )
+
+                    daily_revenue.append({
+                        "date": day_start.date(),
+                        "total_sales": round(agg["total_sales"] or 0, 2),
+                        "orders": agg["total_count"] or 0,
+                    })
+
+                return Response(
+                    {
+                        "sales_type": "week",
+                        "range": {"start": start_date.date(), "end": end_date.date()},
+                        "daily_revenue": daily_revenue,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+            # --- MONTH ---
+            elif sales_param == "month":
+                start_date = datetime.combine(today_local.replace(day=1), datetime.min.time(), tzinfo=pytimezone.utc)
+                if today_local.month == 12:
+                    end_date = datetime(today_local.year + 1, 1, 1, tzinfo=pytimezone.utc)
+                else:
+                    end_date = datetime(today_local.year, today_local.month + 1, 1, tzinfo=pytimezone.utc)
+
+            # --- YEAR ---
+            elif sales_param == "year":
+                try:
+                    year = int(year_param) if year_param else today_local.year
+                except ValueError:
+                    return Response(
+                        {"error": "Invalid year. Example: ?sales=year&year=2025"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                start_date = datetime(year, 1, 1, tzinfo=pytimezone.utc)
+                end_date = datetime(year + 1, 1, 1, tzinfo=pytimezone.utc)
+
+            # --- TOTAL ---
+            elif sales_param == "total":
+                agg = (
+                    Order.objects.filter(status="served")
+                    .aggregate(
+                        total_sales=Sum("total", output_field=FloatField()),
+                        total_count=Count("id"),
+                    )
+                )
+                return Response(
+                    {
+                        "sales_type": "total",
+                        "served_sales_total": round(agg["total_sales"] or 0, 2),
+                        "served_orders_count": agg["total_count"] or 0,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+            # --- CUSTOM RANGE ---
+            elif sales_param == "custom":
+                start_str = request.query_params.get("start")
+                end_str = request.query_params.get("end")
+                if not start_str or not end_str:
+                    return Response(
+                        {"error": "Provide both 'start' and 'end' dates. Example: ?sales=custom&start=2025-11-01&end=2025-11-10"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                try:
+                    start_date = datetime.strptime(start_str, "%Y-%m-%d").replace(tzinfo=pytimezone.utc)
+                    end_date = datetime.strptime(end_str, "%Y-%m-%d").replace(tzinfo=pytimezone.utc) + timedelta(days=1)
+                except ValueError:
+                    return Response(
+                        {"error": "Invalid date format. Use YYYY-MM-DD for both start and end."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+            else:
+                return Response(
+                    {"error": f"Invalid sales parameter '{sales_param}'."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # --- Aggregate for daily/weekly/monthly/year/custom ---
+            agg = (
+                Order.objects.filter(
+                    status="served",
+                    created_at__gte=start_date,
+                    created_at__lt=end_date,
+                )
+                .aggregate(
+                    total_sales=Sum("total", output_field=FloatField()),
+                    total_count=Count("id"),
+                )
+            )
+
+            return Response(
+                {
+                    "sales_type": sales_param,
+                    "range": {"start": start_date, "end": end_date},
+                    "served_sales_total": round(agg["total_sales"] or 0, 2),
+                    "served_orders_count": agg["total_count"] or 0,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        # ---------------------
+        # NORMAL ORDER LIST
+        # ---------------------
+        if show_all or date_param == "all":
+            queryset = queryset.order_by("-created_at")
+            serializer = OrderSerializer(queryset, many=True)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+
+        # ---------------------
+        # DATE FILTERING
+        # ---------------------
         now_local = timezone.localtime()
         today_local = now_local.date()
         tz_local = timezone.get_current_timezone()
 
-        # ✅ Determine date range
         if date_param == "today" or not date_param:
             target_date = today_local
         elif date_param == "week":
             start_of_week = today_local - timedelta(days=today_local.weekday())
-            start_of_week = datetime.combine(start_of_week, datetime.min.time(), tzinfo=pytimezone.utc)
-            queryset = queryset.filter(created_at__gte=start_of_week)
+            start_of_week_dt = datetime.combine(start_of_week, datetime.min.time(), tzinfo=pytimezone.utc)
+            queryset = queryset.filter(created_at__gte=start_of_week_dt)
             queryset = queryset.order_by("-created_at")
             serializer = OrderSerializer(queryset, many=True)
             return Response(serializer.data, status=status.HTTP_200_OK)
@@ -699,21 +907,18 @@ class OrdersListAPIView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        # ✅ Filter for that day (UTC safe)
+        # Filter for the specific day
         start_of_day = datetime.combine(target_date, datetime.min.time(), tzinfo=pytimezone.utc)
         end_of_day = start_of_day + timedelta(days=1)
-        queryset = queryset.filter(
-            created_at__gte=start_of_day,
-            created_at__lt=end_of_day,
-        )
+        queryset = queryset.filter(created_at__gte=start_of_day, created_at__lt=end_of_day)
 
-        # ✅ Hourly grouping with local timezone
+        # ---------------------
+        # HOURLY GROUPING
+        # ---------------------
         if group_by == "hourly":
             slots = [(9, 11), (11, 13), (13, 15), (15, 17), (17, 19)]
             result = []
-
             for start_hour, end_hour in slots:
-                # Define times in local timezone (Asia/Kolkata)
                 start_time_local = datetime.combine(target_date, datetime.min.time()).replace(
                     hour=start_hour, tzinfo=tz_local
                 )
@@ -721,7 +926,6 @@ class OrdersListAPIView(APIView):
                     hour=end_hour, tzinfo=tz_local
                 )
 
-                # Convert to UTC for DB comparison
                 start_time_utc = start_time_local.astimezone(pytimezone.utc)
                 end_time_utc = end_time_local.astimezone(pytimezone.utc)
 
@@ -737,11 +941,12 @@ class OrdersListAPIView(APIView):
 
             return Response(result, status=status.HTTP_200_OK)
 
-        # ✅ Default (normal list)
+        # Default: return list of orders
         queryset = queryset.order_by("-created_at")
         serializer = OrderSerializer(queryset, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
-       
+        return Response(serializer.data, status=status.HTTP_200_OK)  
+    
+    
 class UpdateOrderStatusAPIView(APIView):
     def patch(self, request, order_id):
         try:
@@ -1084,9 +1289,21 @@ class TableListAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        # Get 'occupied' query parameter
+        occupied = request.query_params.get('occupied', None)
+
         tables = Table.objects.all().order_by("table_number")
+
+        # If ?occupied=true, show only occupied tables
+        if occupied is not None:
+            if occupied.lower() == 'true':
+                tables = tables.filter(status='occupied')
+            elif occupied.lower() == 'false':
+                tables = tables.exclude(status='occupied')
+
         serializer = TableSerializer(tables, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
         
 class WaiterRequestsByTableAPIView(APIView):
     """
