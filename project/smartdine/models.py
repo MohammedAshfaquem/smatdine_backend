@@ -9,11 +9,11 @@ from django.core.files import File
 from datetime import timedelta
 from django.utils import timezone
 from decimal import Decimal
-from django.conf import settings  # <-- important
+from django.conf import settings  
 
 
 class UserManager(BaseUserManager):
-    def create_user(self, email, name, role='waiter', password=None, **extra_fields):
+    def create_user(self, email, name, role='waiter', password=None, points=0, **extra_fields):
         if not email:
             raise ValueError("Email must be provided")
         email = self.normalize_email(email)
@@ -21,12 +21,14 @@ class UserManager(BaseUserManager):
             email=email,
             name=name,
             role=role,
+            points=points,  
             is_active=False,
             **extra_fields
         )
         user.set_password(password)
         user.save(using=self._db)
         return user
+
 
     def create_superuser(self, email, name, password=None, **extra_fields):
         user = self.create_user(email, name, role='admin', password=password, **extra_fields)
@@ -57,6 +59,8 @@ class User(AbstractBaseUser, PermissionsMixin):
     email_verification_token = models.UUIDField(default=uuid.uuid4, editable=False)
     password_reset_token = models.UUIDField(null=True, blank=True)
     password_reset_sent_at = models.DateTimeField(null=True, blank=True)
+    orders_completed = models.IntegerField(default=0)  
+
 
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['name']
@@ -84,7 +88,6 @@ class User(AbstractBaseUser, PermissionsMixin):
         self.password_reset_token = None
         self.password_reset_sent_at = None
         self.save(update_fields=["password_reset_token", "password_reset_sent_at"])
-
 
 class Table(models.Model):
     STATUS_CHOICES = [
@@ -120,8 +123,6 @@ class Table(models.Model):
 
     def __str__(self):
         return f"Table {self.table_number}"
-
-
 
 class MenuItem(models.Model):
     CATEGORY_CHOICES = [
@@ -217,11 +218,26 @@ class Order(models.Model):
     table = models.ForeignKey("Table", on_delete=models.CASCADE)
     total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
-    estimated_time = models.PositiveIntegerField(default=0)  # in minutes
+    estimated_time = models.PositiveIntegerField(default=0) 
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
-    started_preparing_at = models.DateTimeField(null=True, blank=True)  # ✅ NEW
-
+    started_preparing_at = models.DateTimeField(null=True, blank=True)  
+    chef = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="orders_as_chef",
+        limit_choices_to={'role': 'kitchen'}  
+        )
+    waiter = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="orders_as_waiter",
+        limit_choices_to={'role': 'waiter'}  
+    )
 
     def __str__(self):
         return f"Order {self.id} - Table {self.table.table_number}"

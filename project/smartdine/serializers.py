@@ -208,6 +208,7 @@ class OrderItemSerializer(serializers.ModelSerializer):
 class OrderSerializer(serializers.ModelSerializer):
     items = OrderItemSerializer(many=True, read_only=True)
     table_number = serializers.SerializerMethodField()
+    chef_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
@@ -219,9 +220,26 @@ class OrderSerializer(serializers.ModelSerializer):
             "estimated_time",
             "created_at",
             "updated_at",
-            "started_preparing_at",  # ✅ added this field
+            "started_preparing_at",
             "items",
+            "chef_name",
         ]
+
+    def get_table_number(self, obj):
+        return obj.table_number.number if obj.table_number else None
+
+    def get_chef_name(self, obj):
+        chef = getattr(obj, "chef", None)
+        if chef and getattr(chef, "role", None) == "kitchen":
+            return (
+                getattr(chef, "username", None)
+                or getattr(chef, "full_name", None)
+                or getattr(chef, "first_name", None)
+                or chef.email
+            )
+        return None
+
+
 
     def get_table_number(self, obj):
         """Return table_number from related Table model"""

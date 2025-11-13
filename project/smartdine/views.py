@@ -27,7 +27,8 @@ from django.utils import timezone
 import datetime
 from decimal import Decimal
 from django.db import transaction
-from google import genai
+import google.generativeai as genai
+import requests
 import re
 import os
 import difflib
@@ -662,9 +663,7 @@ class OrderAPIView(APIView):
         )
 
 
-        
-
-
+    
 from datetime import datetime, timedelta, timezone as pytimezone
 from django.utils import timezone
 from rest_framework.views import APIView
@@ -945,7 +944,6 @@ class OrdersListAPIView(APIView):
         queryset = queryset.order_by("-created_at")
         serializer = OrderSerializer(queryset, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)  
-    
     
 class UpdateOrderStatusAPIView(APIView):
     def patch(self, request, order_id):
@@ -1246,45 +1244,106 @@ class KitchenOrdersAPIView(APIView):
         orders = Order.objects.filter(status__in=["pending", "preparing"]).order_by("-created_at")
         serializer = OrderSerializer(orders, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
+    
+class ChefCompletedOrdersAPIView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        """
+        Return all orders completed by this chef
+        """
+        orders = Order.objects.filter(status="served", chef=request.user).order_by("-updated_at")
+        serializer = OrderSerializer(orders, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 class UpdateOrderStatusAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def patch(self, request, order_id):
         """
-        Update order status — example:
+        Update order status and attach chef.
         PATCH /api/kitchen/orders/5/update-status/
         { "status": "preparing" }
         """
         try:
             order = Order.objects.get(id=order_id)
         except Order.DoesNotExist:
-            return Response({"error": "Order not found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": "Order not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
 
         new_status = request.data.get("status")
         valid_statuses = ["pending", "preparing", "ready", "completed"]
 
         if new_status not in valid_statuses:
-            return Response({"error": "Invalid status"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "Invalid status"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        user = request.user
+
+        # ✅ Ownership enforcement
+        if order.chef and order.chef != user:
+            return Response(
+                {"error": "You are not authorized to update this order."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # ✅ If no chef yet and status goes to 'preparing' or beyond, assign this user
+        if order.chef is None and new_status in ["preparing", "ready", "completed"]:
+            order.chef = user
+
+        # ✅ Disallow skipping stages
+        valid_transitions = {
+            "pending": ["preparing"],
+            "preparing": ["ready"],
+            "ready": ["completed"],
+            "completed": [],
+        }
+        if new_status not in valid_transitions.get(order.status, []):
+            return Response(
+                {"error": f"Invalid transition from {order.status} to {new_status}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         order.status = new_status
-        order.save()
+        order.save(update_fields=["status", "chef", "updated_at"])
 
         serializer = OrderSerializer(order)
         return Response(serializer.data, status=status.HTTP_200_OK)
-    
-
 
 class MarkOrderServedAPIView(APIView):
-    """Mark an order as served by the waiter."""
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]  # only logged-in users
 
     def patch(self, request, order_id):
-        order = get_object_or_404(Order, id=order_id)
-        order.status = "served"
-        order.save()
-        return Response({"message": f"Order {order.id} marked as served"}, status=status.HTTP_200_OK)
-    
+        try:
+            order = get_object_or_404(Order, id=order_id)
+            
+            # Assign waiter if not already assigned
+            if order.waiter is None:
+                order.waiter = request.user
+
+            order.status = "served"
+            order.save()
+
+            # Increment the waiter's completed orders count
+            if hasattr(request.user, "orders_completed"):
+                request.user.orders_completed += 1
+                request.user.save()
+            
+            served_by = getattr(request.user, "username", "Waiter")
+            return Response(
+                {"message": f"Order {order.id} marked as served", "served_by": served_by},
+                status=status.HTTP_200_OK
+            )
+        except Exception as e:
+            return Response(
+                {"error": f"Failed to mark order as served: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
 class TableListAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -1303,8 +1362,7 @@ class TableListAPIView(APIView):
 
         serializer = TableSerializer(tables, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
-
-        
+    
 class WaiterRequestsByTableAPIView(APIView):
     """
     Returns all waiter requests for a specific table number.
@@ -1316,9 +1374,7 @@ class WaiterRequestsByTableAPIView(APIView):
         requests = WaiterRequest.objects.filter(table__table_number=table_number).order_by('-created_at')
         serializer = WaiterRequestSerializer(requests, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
-
-
-    
+   
 @api_view(['PATCH'])
 @permission_classes([permissions.AllowAny])  
 def occupy_table(request, table_number):
@@ -1620,164 +1676,230 @@ class ClearTableDataAPIView(APIView):
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
-        
-
-
-
 # ============================================================
 # Keywords & Off-topic Detection
 # ============================================================
 
 FOOD_KEYWORDS = [
-    # General
     "food", "meal", "dish", "menu", "order", "recipe", "ingredient",
     "spice", "sauce", "starter", "dessert", "snack", "drink", "beverage",
     "juice", "coffee", "tea", "breakfast", "lunch", "dinner", "brunch",
+    "diet", "nutrition", "protein", "vegan", "restaurant", "waiter", "chef",
+    "serve", "table", "special", "recommend", "menu item", "order now", "spicy"
+]
 
-    # Nutrition & diet
-    "diet", "diet plan", "healthy", "health", "nutrition", "nutrient",
-    "vitamin", "protein", "carb", "fat", "fiber", "calorie", "balanced",
-    "weight loss", "meal plan", "fitness", "detox", "keto", "paleo", "vegan",
-    "vegetarian", "gluten", "allergy", "low calorie", "low carb", "high protein",
-
-    # Restaurant
-    "restaurant", "table", "waiter", "bill", "chef", "special",
-    "recommend", "menu item", "order now", "spicy"
+GREETING_KEYWORDS = [
+    "hi", "hello", "hey", "good morning", "good evening", "how are you", "what’s up"
 ]
 
 OFFTOPIC_PATTERNS = re.compile(
     r"\b(politics|president|religion|war|sex|porn|crypto|stock|investment|lawsuit|celebrity|movie|game)\b",
-    re.IGNORECASE,
+    re.IGNORECASE
 )
 
 # ============================================================
 # Helper Functions
 # ============================================================
 
+def is_offtopic(text: str) -> bool:
+    return bool(OFFTOPIC_PATTERNS.search(text))
+
+def is_greeting(text: str) -> bool:
+    text_l = text.lower()
+    return any(greet in text_l for greet in GREETING_KEYWORDS)
+
 def looks_food_related(text: str) -> bool:
-    """Detect if the message is food-related, with fuzzy typo tolerance."""
     text_l = text.lower()
     words = re.findall(r"\b\w+\b", text_l)
 
-    # Direct keyword match
+    # Direct food keyword match
     for kw in FOOD_KEYWORDS:
         if kw in text_l:
             return True
 
-    # Fuzzy typo match
+    # Fuzzy typo tolerance
     for word in words:
         close = difflib.get_close_matches(word, FOOD_KEYWORDS, n=1, cutoff=0.8)
         if close:
             return True
-
-    # Regex fallback
-    if re.search(r"\b(cook|eat|restaurant|nutrition|diet|food|menu|dish|meal|ingredient|health|protein|fruit|vegetable|spicy)\b", text_l):
-        return True
     return False
 
 def cleanup_response(resp_text: str) -> str:
-    """Cleans Gemini's raw output for user-friendly display."""
+    """Clean Gemini response for readability, preserving number ranges like 15–25."""
     if not resp_text:
         return "Sorry, I couldn’t generate a response."
+    if is_offtopic(resp_text):
+        return "I can only help with food, health, nutrition, and restaurant menu questions."
 
-    if OFFTOPIC_PATTERNS.search(resp_text):
-        return "I can only help with food, health, nutrition, and menu-related questions."
-
-    text = resp_text
-    text = re.sub(r"(?is)(okay!|sure!|to give you the best recommendations|could you tell me more|once I know).*", "", text)
-    text = re.sub(r"[*_#>`~-]+", "", text)
-    text = re.sub(r"\n{2,}", "\n", text)
+    # Remove unnecessary symbols but preserve dashes for ranges
+    text = re.sub(r"[*_#>`~]+", "", resp_text)
     text = re.sub(r"\s{2,}", " ", text).strip()
 
     if len(text.split()) > 100:
         text = " ".join(text.split()[:100]) + "..."
     return text
 
-# ============================================================
-# Dynamic DB Context Fetching
-# ============================================================
-
 def find_relevant_items(question: str):
-    """Return relevant dishes or ingredients based on context keywords."""
+    """Fetch relevant dishes or ingredients from the DB for RAG context."""
     question = question.lower()
-    dishes = []
-    ingredients = []
+    dishes, ingredients = [], []
 
-    # --- Spicy ---
     if "spicy" in question:
-        dishes = list(MenuItem.objects.filter(spice_level__gte=2, availability=True).values_list("name", flat=True))
-        ingredients = list(Ingredient.objects.filter(category="spice").values_list("name", flat=True))
+        dishes = list(MenuItem.objects.filter(spice_level__gte=2, availability=True)
+                      .values_list("name", flat=True))
+        ingredients = list(Ingredient.objects.filter(category="spice")
+                           .values_list("name", flat=True))
 
-    # --- Diet / Healthy ---
     elif "diet" in question or "healthy" in question:
         bases = list(Base.objects.all().values("name", "description"))
-        ingredient_objs = Ingredient.objects.filter(category__in=["fruit", "green", "citrus", "extra", "sweetener"]).order_by("category", "name")
+        ingredient_objs = Ingredient.objects.filter(
+            category__in=["fruit", "green", "citrus", "extra", "sweetener"]
+        ).order_by("category", "name")
         ingredients = [i.name for i in ingredient_objs]
+        dishes = [f"{base['name']} with {', '.join(ingredients[:3])}" for base in bases]
 
-        # Combine bases with 2-3 ingredients randomly for suggestions
-        diet_suggestions = []
-        for base in bases:
-            combo = f"{base['name']} with " + ", ".join(ingredients[:3])
-            diet_suggestions.append(combo)
-        dishes = diet_suggestions
-
-    # --- Dessert / Sweet ---
     elif "dessert" in question or "sweet" in question:
-        dishes = list(MenuItem.objects.filter(category="dessert", availability=True).values_list("name", flat=True))
-        ingredients = list(Ingredient.objects.filter(category="sweetener").values_list("name", flat=True))
+        dishes = list(MenuItem.objects.filter(category="dessert", availability=True)
+                      .values_list("name", flat=True))
+        ingredients = list(Ingredient.objects.filter(category="sweetener")
+                           .values_list("name", flat=True))
 
-    # --- Fallback ---
     if not dishes and not ingredients:
         return None
-
-    return {
-        "dishes": dishes,
-        "ingredients": ingredients,
-    }
+    return {"dishes": dishes, "ingredients": ingredients}
 
 # ============================================================
-# API Endpoint
+# Chat API
 # ============================================================
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def chat_with_gemini(request):
-    """Handles SmartDine AI chat requests."""
+    """SmartDine AI Chat Assistant with context-aware responses."""
     question = (request.data.get("message") or "").strip()
     if not question:
         return Response({"error": "Empty message"}, status=400)
 
-    if not looks_food_related(question):
-        return Response({"reply": "I can only help with food, health, nutrition, and menu-related questions."})
+    # Friendly greeting
+    if is_greeting(question):
+        return Response({
+            "reply": "Hi there! 👋 I’m SmartDine, your restaurant assistant. "
+                     "How can I help you today — ordering, menu suggestions, or meal details?"
+        })
 
+    # Block off-topic questions
+    if is_offtopic(question):
+        return Response({
+            "reply": "I can only assist with SmartDine restaurant orders, food, or nutrition-related questions."
+        })
+
+    # Load Gemini API key
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         return Response({"error": "Gemini API key not set"}, status=500)
 
+    # Fetch relevant menu items or ingredients (RAG)
     context_data = find_relevant_items(question)
     base_context = ""
+    custom_available = True
     if context_data:
-        dishes = ", ".join(context_data.get("dishes", [])) or "none found"
-        ingredients = ", ".join(context_data.get("ingredients", [])) or "none found"
-        base_context = f"Related dishes: {dishes}. Ingredients you can use: {ingredients}."
+        dishes = context_data.get("dishes", [])
+        ingredients = context_data.get("ingredients", [])
+        if not dishes:
+            dishes_text = "No matching dishes available."
+            custom_available = True
+        else:
+            dishes_text = ", ".join(dishes)
+        if not ingredients:
+            ingredients_text = "No ingredients available."
+        else:
+            ingredients_text = ", ".join(ingredients)
+        base_context = f"Related dishes: {dishes_text}. Suggested ingredients: {ingredients_text}."
+    else:
+        base_context = "No menu items found for your request. You can try a custom dish."
+
+    # Restaurant service info
+    restaurant_context = (
+        "Each order takes around 15–25 minutes to prepare depending on size. "
+        "Pricing depends on quantity, and our waiters will serve your table as soon as it's ready. "
+        "All service is handled by SmartDine restaurant staff."
+    )
 
     try:
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=[{
-                "parts": [{
-                    "text": (
-                        "You are SmartDine’s AI assistant. Only answer questions about food, diet, health, or restaurant menus. "
-                        "Keep responses short, natural, and under 100 words. Never use markdown or bullet lists.\n\n"
-                        f"{base_context}\nUser: {question}"
-                    )
-                }]
-            }],
+        # Configure Gemini
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-2.0-flash")
+
+        prompt = (
+            f"You are SmartDine's restaurant assistant. "
+            f"Always greet politely and appreciate the customer. "
+            f"Answer only about food, menus, or restaurant orders. "
+            f"Keep answers short, natural, and human — under 100 words.\n\n"
+            f"{base_context}\n\n{restaurant_context}\n\n"
+            f"Customer: {question}"
         )
 
+        response = model.generate_content(prompt)
         reply = cleanup_response(response.text)
+
+        # Add custom dish suggestion if no menu item
+        if not context_data or not context_data.get("dishes"):
+            reply += " You can also request a custom dish, and our chefs will prepare it for you!"
+
         return Response({"reply": reply})
 
     except Exception as e:
-        return Response({"error": "Gemini API request failed", "details": str(e)}, status=502)
+        return Response({
+            "error": "Gemini API request failed",
+            "details": str(e)
+        }, status=502)
+        
+        
+class LeaderboardView(APIView):
+    """
+    Returns a leaderboard of users based on completed orders.
+    Each order gives 20 points. Supports kitchen or waiter filter.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        role_filter = None
+        if request.query_params.get("kitchen") == "true":
+            role_filter = "kitchen"
+        elif request.query_params.get("waiter") == "true":
+            role_filter = "waiter"
+
+        try:
+            # Filter users by role
+            if role_filter:
+                users = User.objects.filter(role=role_filter, is_active=True)
+            else:
+                users = User.objects.filter(role__in=["kitchen", "waiter"], is_active=True)
+
+            leaderboard = []
+            POINTS_PER_ORDER = 20
+
+            for user in users:
+                if user.role == "kitchen":
+                    orders_count = Order.objects.filter(chef=user, status="served").count()
+                elif user.role == "waiter":
+                    orders_count = Order.objects.filter(waiter=user, status="served").count()
+                else:
+                    orders_count = 0
+
+                leaderboard.append({
+                    "email": user.email,
+                    "name": getattr(user, "name", ""),
+                    "points": orders_count * POINTS_PER_ORDER,
+                    "orders_completed": orders_count
+                })
+
+            leaderboard.sort(key=lambda x: x["points"], reverse=True)
+
+            return Response({"leaderboard": leaderboard}, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            return Response(
+                {"error": f"Error fetching leaderboard: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )

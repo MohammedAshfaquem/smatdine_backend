@@ -1,13 +1,17 @@
+version: "3.9"
+
 services:
   smartdine_backend:
     container_name: smartdine_container
     build:
       context: .
       dockerfile: Dockerfile
-    ports: 
+    ports:
       - "8000:8000"
     volumes:
       - "C:/Users/Afi/Desktop/SmartDine/backend/project:/app"
+    env_file:
+      - .env        # ✅ Loads all environment variables (including GEMINI_API_KEY)
     environment:
       - PYTHONUNBUFFERED=1
       - UNSPLASH_ACCESS_KEY=${UNSPLASH_ACCESS_KEY}

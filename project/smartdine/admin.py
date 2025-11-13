@@ -86,11 +86,25 @@ class OrderItemInline(admin.TabularInline):
     readonly_fields = ("subtotal",)
 
 
+class OrderItemInline(admin.TabularInline):
+    model = OrderItem
+    extra = 0
+
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
-    list_display = ("id", "table", "total", "status", "estimated_time", "created_at", "updated_at")
-    list_filter = ("status",)
-    search_fields = ("table__table_number",)
+    list_display = (
+        "id",
+        "table",
+        "total",
+        "status",
+        "chef",
+        "waiter",
+        "estimated_time",
+        "created_at",
+        "updated_at",
+    )
+    list_filter = ("status", "chef", "waiter")
+    search_fields = ("table__table_number", "chef__email", "waiter__email")
     inlines = [OrderItemInline]
 
 

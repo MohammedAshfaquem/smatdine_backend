@@ -5,7 +5,7 @@ from .views import (
     RequestPasswordResetView, PasswordResetConfirmView, ValidateResetTokenView,
     # --- Admin / Staff Management ---
     PendingUsersView, ApproveUserView, PendingRequestsCountView,
-    StaffListView, StaffActionView,
+    StaffListView, StaffActionView,LeaderboardView,
     # --- Table Views ---
     table_redirect_view, get_table, occupy_table, release_table, TableListAPIView,
     # --- Menu & Cart ---
@@ -19,7 +19,7 @@ from .views import (
     WaiterRequestAPIView, WaiterRequestListAPIView, WaiterRequestUpdateAPIView,
     WaiterRequestsByTableAPIView, MarkOrderServedAPIView,ClearTableDataAPIView,
     # --- Kitchen ---
-    KitchenOrdersAPIView, UpdateOrderStatusAPIView,
+    KitchenOrdersAPIView, UpdateOrderStatusAPIView,ChefCompletedOrdersAPIView,
     # --- Custom Dish (AI / Builder Section) ---
     BaseListView, IngredientListView, CreateCustomDishView,
     CustomDishListByTableView, CustomDishListAllView, ReorderCustomDishView,
@@ -57,6 +57,7 @@ urlpatterns = [
     path('api/admin/pending-count/', PendingRequestsCountView.as_view(), name='pending_count'),
     path('api/admin/staffs/', StaffListView.as_view(), name='staff-list'),
     path('api/admin/staffs/<int:pk>/action/', StaffActionView.as_view(), name='staff-action'),
+    path("reports/leaderboard/", LeaderboardView.as_view(), name="leaderboard"),
 
     # ==========================
     # 🍽 TABLES
@@ -100,6 +101,7 @@ urlpatterns = [
     # ==========================
     path('kitchen/orders/', KitchenOrdersAPIView.as_view(), name='kitchen-orders'),
     path('kitchen/orders/<int:order_id>/update-status/', UpdateOrderStatusAPIView.as_view(), name='update-order-status'),
+    path("kitchen/orders/completed/", ChefCompletedOrdersAPIView.as_view(), name="chef-completed-orders"),
 
     # ==========================
     # 🧑‍💼 WAITER
@@ -110,6 +112,7 @@ urlpatterns = [
     path('waiter/orders/<int:order_id>/served/', MarkOrderServedAPIView.as_view(), name='waiter-mark-served'),
     path('waiter/requests/<int:table_number>/', WaiterRequestsByTableAPIView.as_view(), name='waiter-requests-by-table'),
     path('waiter/tables/clear/<int:table_number>/', ClearTableDataAPIView.as_view(), name='clear-table'),
+     path("waiter/orders/<int:order_id>/mark-served/", MarkOrderServedAPIView.as_view(), name="mark-order-served"),
     
     path("service-requests/", ServiceRequestAPIView.as_view(), name="service-requests"),
 
