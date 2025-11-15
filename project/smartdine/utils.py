@@ -2,6 +2,9 @@
 from django.core.mail import send_mail
 from django.conf import settings
 import os
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+
 
 def send_verification_email(user):
     try:
@@ -65,5 +68,4 @@ def get_unsplash_image(dish):
     except requests.RequestException as e:
         print("Unsplash request failed:", e)
         return None
-
 

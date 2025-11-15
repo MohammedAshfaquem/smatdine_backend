@@ -11,7 +11,7 @@ from rest_framework.views import APIView
 from .serializers import (StaffRegisterSerializer,
                           StaffLoginSerializer,WaiterRequestSerializer,IngredientSerializer,CustomDishSerializer,
                           TableSerializer,StaffSerializer,MenuItemSerializer,CartSerializer,CartItemSerializer,
-                          OrderSerializer,FeedbackSerializer,BaseSerializer
+                          OrderSerializer,BaseSerializer
 )
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
@@ -20,7 +20,7 @@ from .models import (Table,MenuItem,CartItem,Cart,OrderItem,Order,
                      Feedback,WaiterRequest,Base,CustomDish,
                      CustomDishIngredient,Ingredient,TableHistory)
 from django.conf import settings
-from django.db.models import Sum, FloatField, Count,F
+from django.db.models import Sum, FloatField, Count,F,Q
 from datetime import timedelta
 from datetime import timezone as pytimezone
 from django.utils import timezone
@@ -32,6 +32,15 @@ import requests
 import re
 import os
 import difflib
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+from django.http import HttpResponse
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Table as TablePDF, TableStyle, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
+from reportlab.lib.units import mm
+
+
 
 
 User = get_user_model()
@@ -340,7 +349,6 @@ class MenuItemAPIView(APIView):
             status=status.HTTP_204_NO_CONTENT,
         )
 
-
 class MenuItemDetailAPIView(APIView):
     parser_classes = [parsers.MultiPartParser, parsers.FormParser]
     def get_permissions(self):
@@ -383,17 +391,87 @@ class MenuItemDetailAPIView(APIView):
             status=status.HTTP_204_NO_CONTENT,
         )
 
+class WaiterRequestAPIView(APIView):
+    """
+    Customer creates a waiter request (e.g., need water, need bill, clean table, general)
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request, table_id):
+        table = get_object_or_404(Table, table_number=table_id)
+        req_type = request.data.get("type")
+        valid_types = ['need water', 'need bill', 'clean table', 'general']
+
+        if req_type not in valid_types:
+            return Response(
+                {"error": f"Invalid request type. Must be one of {valid_types}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        description = request.data.get("description", "").strip() if req_type == "general" else ""
+
+        # Create active waiter request
+        waiter_request = WaiterRequest.objects.create(
+            table=table,
+            type=req_type,
+            description=description,
+            is_active=True
+        )
+
+        msg = f"Waiter request '{req_type}' sent for Table {table.table_number}"
+        if req_type == "general" and description:
+            msg += f": {description}"
+
+        return Response(
+            {
+                "message": msg,
+                "request": {
+                    "id": waiter_request.id,
+                    "table_number": waiter_request.table.table_number,
+                    "type": waiter_request.type,
+                    "description": waiter_request.description,
+                    "status": waiter_request.status,
+                    "created_at": waiter_request.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            },
+            status=status.HTTP_201_CREATED
+        )
+
 class CartAPIView(APIView):
     permission_classes = [permissions.AllowAny]
+
     def get_cart(self, table_number):
-        """Ensure every table has its own cart."""
+        """Ensure every table has its own active cart."""
         table = get_object_or_404(Table, table_number=table_number)
-        cart, _ = Cart.objects.get_or_create(table=table)
+        cart, created = Cart.objects.get_or_create(table=table, defaults={"is_active": True})
+        if not created and not cart.is_active:
+            cart.is_active = True
+            cart.save()
         return cart
-    def get(self, request, table_number):
+
+    def get(self, request, table_number=None):
+        if not table_number:
+            return Response({"error": "Missing table_number"}, status=status.HTTP_400_BAD_REQUEST)
+
         cart = self.get_cart(table_number)
-        serializer = CartSerializer(cart)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        items = cart.items.filter(is_active=True)
+        serialized_items = []
+        for item in items:
+            serialized_items.append({
+                "id": item.id,
+                "is_custom": item.is_custom,
+                "name": item.custom_dish.name if item.is_custom else item.menu_item.name,
+                "image": item.custom_dish.image_url if item.is_custom else (item.menu_item.image.url if item.menu_item.image else None),
+                "quantity": item.quantity,
+                "subtotal": str(item.subtotal),
+                "special_instructions": getattr(item, "special_instructions", ""),
+            })
+        return Response({
+            "cart_id": cart.id,
+            "table_number": cart.table.table_number,
+            "items": serialized_items,
+            "total_amount": float(sum(float(i["subtotal"]) for i in serialized_items))
+        }, status=status.HTTP_200_OK)
 
     def post(self, request):
         table_number = request.data.get("table_number")
@@ -411,8 +489,7 @@ class CartAPIView(APIView):
         if is_custom:
             if not custom_dish_id:
                 return Response({"error": "Missing custom_dish_id"}, status=status.HTTP_400_BAD_REQUEST)
-
-            custom_dish = get_object_or_404(CustomDish, id=custom_dish_id)
+            custom_dish = get_object_or_404(CustomDish, id=custom_dish_id, is_active=True)
             cart_item, created = CartItem.objects.get_or_create(
                 cart=cart,
                 custom_dish=custom_dish,
@@ -421,19 +498,21 @@ class CartAPIView(APIView):
                     "special_instructions": special_instructions,
                     "is_custom": True,
                     "menu_item": None,
+                    "is_active": True,
                 },
             )
         else:
             if not menu_item_id:
                 return Response({"error": "Missing menu_item_id"}, status=status.HTTP_400_BAD_REQUEST)
-
             menu_item = get_object_or_404(MenuItem, id=menu_item_id)
-            existing_cart_item = CartItem.objects.filter(cart=cart, menu_item=menu_item).first()
+            existing_cart_item = CartItem.objects.filter(cart=cart, menu_item=menu_item, is_active=True).first()
             existing_quantity = existing_cart_item.quantity if existing_cart_item else 0
 
+            # Check stock availability and prevent exceeding stock
             if menu_item.stock is not None and (existing_quantity + quantity) > menu_item.stock:
+                available_quantity = menu_item.stock - existing_quantity
                 return Response(
-                    {"error": f"Only {menu_item.stock - existing_quantity} item(s) available in your cart"},
+                    {"message": f"Max quantity reached. Only {available_quantity} item(s) available."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -444,37 +523,36 @@ class CartAPIView(APIView):
                     "quantity": quantity,
                     "special_instructions": special_instructions,
                     "is_custom": False,
+                    "is_active": True,
                 },
             )
 
         if not created:
             new_quantity = cart_item.quantity + quantity
-            if cart_item.menu_item and cart_item.menu_item.stock is not None:
-                if new_quantity > cart_item.menu_item.stock:
-                    return Response(
-                        {"error": f"Only {cart_item.menu_item.stock - cart_item.quantity} more item(s) can be added"},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
+            # Check stock availability and prevent exceeding stock
+            if cart_item.menu_item and cart_item.menu_item.stock is not None and new_quantity > cart_item.menu_item.stock:
+                available_quantity = cart_item.menu_item.stock - cart_item.quantity
+                return Response(
+                    {"message": f"Max quantity reached. Only {available_quantity} more item(s) can be added."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             cart_item.quantity = new_quantity
             if special_instructions:
                 cart_item.special_instructions = special_instructions
+            cart_item.is_active = True
             cart_item.save()
 
-        name = cart_item.custom_dish.name if cart_item.is_custom else cart_item.menu_item.name
-
-        return Response(
-            {
-                "message": f"Item added to cart for Table {cart.table.table_number}",
-                "item": name,
-                "quantity": cart_item.quantity,
-            },
-            status=status.HTTP_201_CREATED,
-        )
+        return Response({
+            "message": f"Item added to cart for Table {cart.table.table_number}",
+            "item": cart_item.custom_dish.name if cart_item.is_custom else cart_item.menu_item.name,
+            "quantity": cart_item.quantity,
+            "image": cart_item.custom_dish.image_url if cart_item.is_custom else (cart_item.menu_item.image.url if cart_item.menu_item.image else None)
+        }, status=status.HTTP_201_CREATED)
 
     def patch(self, request):
         table_number = request.data.get("table_number")
         item_id = request.data.get("item_id")
-        quantity = int(request.data.get("quantity"))
+        quantity = int(request.data.get("quantity", 1))
 
         if not table_number or not item_id:
             return Response({"error": "Missing table_number or item_id"}, status=status.HTTP_400_BAD_REQUEST)
@@ -482,36 +560,44 @@ class CartAPIView(APIView):
         cart = self.get_cart(table_number)
         cart_item = get_object_or_404(CartItem, id=item_id, cart=cart)
 
-        if cart_item.menu_item and cart_item.menu_item.stock is not None:
-            if quantity > cart_item.menu_item.stock:
-                return Response(
-                    {"error": f"Only {cart_item.menu_item.stock} item(s) available in stock"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+        # Check stock availability and prevent exceeding stock
+        if cart_item.menu_item and cart_item.menu_item.stock is not None and quantity > cart_item.menu_item.stock:
+            return Response({"message": f"Max quantity reached. Only {cart_item.menu_item.stock} item(s) available."},
+                            status=status.HTTP_400_BAD_REQUEST)
 
         cart_item.quantity = quantity
         cart_item.save()
-        return Response({"message": f"Quantity updated for Table {cart.table.table_number}"}, status=status.HTTP_200_OK)
+        return Response({"message": "Quantity updated", "quantity": cart_item.quantity}, status=status.HTTP_200_OK)
 
-    def delete(self, request, item_id):
-        table_number = request.query_params.get("table_number")
+    def delete(self, request, item_id=None, table_number=None):
+        table_number = table_number or request.query_params.get("table_number")
+
         if not table_number:
-            return Response({"error": "Missing table_number in query params"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "Missing table_number"}, status=status.HTTP_400_BAD_REQUEST)
 
         cart = self.get_cart(table_number)
-        cart_item = get_object_or_404(CartItem, id=item_id, cart=cart)
-        cart_item.delete()
-        return Response({"message": f"Item removed from Table {cart.table.table_number}"}, status=status.HTTP_204_NO_CONTENT)
 
-    def get_item_quantity(self, request, table_number, menu_item_id=None, custom_dish_id=None):
-        cart = self.get_cart(table_number)
-        if menu_item_id:
-            cart_item = CartItem.objects.filter(cart=cart, menu_item_id=menu_item_id).first()
-        elif custom_dish_id:
-            cart_item = CartItem.objects.filter(cart=cart, custom_dish_id=custom_dish_id).first()
-        else:
-            return Response({"quantity": 0})
-        return Response({"quantity": cart_item.quantity if cart_item else 0})
+        if item_id:
+            cart_item = get_object_or_404(CartItem, id=item_id, cart=cart)
+            cart_item.delete()
+            return Response({"message": "Item removed"}, status=status.HTTP_204_NO_CONTENT)
+
+        cart.items.all().delete()
+        return Response({"message": "Cart cleared"}, status=status.HTTP_204_NO_CONTENT)
+
+    
+class CartCountView(APIView):   
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, table_number):
+        # Get the latest active cart for the table
+        cart = Cart.objects.filter(table__table_number=table_number, is_active=True).first()
+        if not cart:
+            return Response({"count": 0})  # No active cart, count is 0
+
+        # Count only active items in the cart
+        item_count = cart.items.filter(is_active=True).count()
+        return Response({"count": item_count})
 
 class CartItemQuantityAPIView(APIView):
     permission_classes = [permissions.AllowAny]
@@ -521,42 +607,34 @@ class CartItemQuantityAPIView(APIView):
         cart = get_object_or_404(Cart, table__table_number=table_number)
         quantity = 0
         if menu_item_id:
-            cart_item = CartItem.objects.filter(cart=cart, menu_item_id=menu_item_id).first()
+            cart_item = CartItem.objects.filter(cart=cart, menu_item_id=menu_item_id, is_active=True).first()
             if cart_item:
                 quantity = cart_item.quantity
-        return Response({"quantity": quantity}, status=status.HTTP_200_OK) 
+        return Response({"quantity": quantity}, status=status.HTTP_200_OK)
 
-class CartCountView(APIView):
-    permission_classes = [permissions.AllowAny]
 
-    def get(self, request, table_number):
-        try:
-            cart = Cart.objects.filter(table__table_number=table_number).first()
-            count = 0
-            if cart and hasattr(cart, 'items'):
-                count = cart.items.count()
-            return Response({"count": count})
-        except Exception as e:
-            return Response({"count": 0, "error": str(e)}, status=500)
-
-                
 @api_view(['GET'])
 @permission_classes([AllowAny])
-def get_cart(request, table_number):
+def get_cart_items(request, table_number):
+    """Return active cart items only."""
     try:
         table = Table.objects.get(table_number=table_number)
     except Table.DoesNotExist:
         return Response({"detail": "No Table matches the given number."}, status=status.HTTP_404_NOT_FOUND)
 
-    cart, created = Cart.objects.get_or_create(table=table)
-    items = cart.items.all()
+    cart, created = Cart.objects.get_or_create(table=table, defaults={"is_active": True})
+    items = cart.items.filter(is_active=True)
+
     data = {
         "table": table.table_number,
         "items": [
             {
-                "menu_item": item.menu_item.name,
+                "id": item.id,
+                "menu_item": item.menu_item.name if item.menu_item else None,
+                "custom_dish": item.custom_dish.name if item.custom_dish else None,
                 "quantity": item.quantity,
-                "special_instructions": getattr(item, "special_instructions", "")
+                "special_instructions": getattr(item, "special_instructions", ""),
+                "subtotal": str(item.subtotal)
             }
             for item in items
         ]
@@ -603,6 +681,7 @@ class OrderAPIView(APIView):
         order = Order.objects.create(
             table=table,
             status="pending",
+            is_active=True,
         )
 
         total = Decimal("0.00")
@@ -661,30 +740,14 @@ class OrderAPIView(APIView):
             },
             status=status.HTTP_201_CREATED,
         )
+   
 
-
-    
-from datetime import datetime, timedelta, timezone as pytimezone
-from django.utils import timezone
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status, permissions
-from .models import Order
-from .serializers import OrderSerializer
+from datetime import datetime
 
 
 class OrdersListAPIView(APIView):
     """
     Unified endpoint for order listings and sales analytics.
-
-    Filters:
-      - status=<pending|preparing|ready|served|all>
-      - date=today|week|YYYY-MM-DD|all
-      - all=true  → return all orders (ignores date)
-      - sales=today|week|month|year|total|custom|top_items
-      - year=YYYY (used when sales=year)
-      - start=YYYY-MM-DD&end=YYYY-MM-DD (used when sales=custom)
-      - group_by=hourly (for 2-hour bar chart grouping)
     """
 
     permission_classes = [permissions.IsAuthenticated]
@@ -693,7 +756,7 @@ class OrdersListAPIView(APIView):
         status_param = request.query_params.get("status", "").lower().strip()
         date_param = request.query_params.get("date", "").lower().strip()
         group_by = request.query_params.get("group_by", "").lower().strip()
-        show_all = request.query_params.get("all", "").lower().strip() == "true"
+        show_all = str(request.query_params.get("all", "")).lower().strip() == "true"
         sales_param = request.query_params.get("sales", "").lower().strip()
         year_param = request.query_params.get("year", "").strip()
 
@@ -710,6 +773,8 @@ class OrdersListAPIView(APIView):
             valid_statuses = ["pending", "preparing", "ready", "served"]
             if status_param in valid_statuses:
                 queryset = queryset.filter(status=status_param)
+                if status_param in ["pending", "preparing", "ready", "served"]:
+                    queryset = queryset.filter(is_active=True)
             else:
                 return Response(
                     {"error": f"Invalid status '{status_param}'."},
@@ -722,10 +787,12 @@ class OrdersListAPIView(APIView):
         if sales_param:
             now_local = timezone.localtime()
             today_local = now_local.date()
+
+            # Initialize start/end date
             start_date = None
             end_date = None
 
-            # --- TOP 5 SOLD ITEMS ---
+            # ---- TOP ITEMS ----
             if sales_param == "top_items":
                 top_items = (
                     OrderItem.objects.filter(order__status="served")
@@ -736,59 +803,63 @@ class OrdersListAPIView(APIView):
                     )
                     .order_by("-quantity_sold")[:5]
                 )
-
                 return Response(
-                    {
-                        "sales_type": "top_items",
-                        "top_5_items": list(top_items),
-                    },
+                    {"sales_type": "top_items", "top_5_items": list(top_items)},
                     status=status.HTTP_200_OK,
                 )
 
-            # --- TODAY ---
+            # ---- TODAY ----
             elif sales_param == "today":
                 start_date = datetime.combine(today_local, datetime.min.time(), tzinfo=pytimezone.utc)
                 end_date = start_date + timedelta(days=1)
 
-            # --- WEEK (with daily breakdown) ---
+            # ---- WEEK ----
             elif sales_param == "week":
-                start_of_week = today_local - timedelta(days=today_local.weekday())  # Monday
+                start_of_week = today_local - timedelta(days=today_local.weekday())
                 start_date = datetime.combine(start_of_week, datetime.min.time(), tzinfo=pytimezone.utc)
                 end_date = start_date + timedelta(days=7)
 
-                # Calculate daily revenue Mon–Sun
-                daily_revenue = []
+                # Daily revenue data for chart
+                daily_data = []
                 for i in range(7):
                     day_start = start_date + timedelta(days=i)
                     day_end = day_start + timedelta(days=1)
-
-                    agg = (
+                    total = (
                         Order.objects.filter(
                             status="served",
                             created_at__gte=day_start,
                             created_at__lt=day_end,
                         ).aggregate(
-                            total_sales=Sum("total", output_field=FloatField()),
-                            total_count=Count("id"),
-                        )
+                            total_sales=Sum("total", output_field=FloatField())
+                        )["total_sales"]
+                        or 0
                     )
-
-                    daily_revenue.append({
-                        "date": day_start.date(),
-                        "total_sales": round(agg["total_sales"] or 0, 2),
-                        "orders": agg["total_count"] or 0,
+                    daily_data.append({
+                        "date": day_start.strftime("%a"),  # e.g., Mon, Tue
+                        "total_sales": round(total, 2),
                     })
+
+                total_week_sales = sum(d["total_sales"] for d in daily_data)
+                order_count = (
+                    Order.objects.filter(
+                        status="served",
+                        created_at__gte=start_date,
+                        created_at__lt=end_date,
+                    ).count()
+                )
 
                 return Response(
                     {
                         "sales_type": "week",
-                        "range": {"start": start_date.date(), "end": end_date.date()},
-                        "daily_revenue": daily_revenue,
+                        "range": {"start": start_date, "end": end_date},
+                        "served_sales_total": round(total_week_sales, 2),
+                        "served_orders_count": order_count,
+                        "daily_revenue": daily_data,
                     },
                     status=status.HTTP_200_OK,
                 )
 
-            # --- MONTH ---
+            # ---- MONTH ----
             elif sales_param == "month":
                 start_date = datetime.combine(today_local.replace(day=1), datetime.min.time(), tzinfo=pytimezone.utc)
                 if today_local.month == 12:
@@ -796,19 +867,13 @@ class OrdersListAPIView(APIView):
                 else:
                     end_date = datetime(today_local.year, today_local.month + 1, 1, tzinfo=pytimezone.utc)
 
-            # --- YEAR ---
+            # ---- YEAR ----
             elif sales_param == "year":
-                try:
-                    year = int(year_param) if year_param else today_local.year
-                except ValueError:
-                    return Response(
-                        {"error": "Invalid year. Example: ?sales=year&year=2025"},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
+                year = int(year_param) if year_param else today_local.year
                 start_date = datetime(year, 1, 1, tzinfo=pytimezone.utc)
                 end_date = datetime(year + 1, 1, 1, tzinfo=pytimezone.utc)
 
-            # --- TOTAL ---
+            # ---- TOTAL ----
             elif sales_param == "total":
                 agg = (
                     Order.objects.filter(status="served")
@@ -826,58 +891,45 @@ class OrdersListAPIView(APIView):
                     status=status.HTTP_200_OK,
                 )
 
-            # --- CUSTOM RANGE ---
+            # ---- CUSTOM ----
             elif sales_param == "custom":
                 start_str = request.query_params.get("start")
                 end_str = request.query_params.get("end")
                 if not start_str or not end_str:
                     return Response(
-                        {"error": "Provide both 'start' and 'end' dates. Example: ?sales=custom&start=2025-11-01&end=2025-11-10"},
+                        {"error": "Provide both start and end dates."},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
-                try:
-                    start_date = datetime.strptime(start_str, "%Y-%m-%d").replace(tzinfo=pytimezone.utc)
-                    end_date = datetime.strptime(end_str, "%Y-%m-%d").replace(tzinfo=pytimezone.utc) + timedelta(days=1)
-                except ValueError:
-                    return Response(
-                        {"error": "Invalid date format. Use YYYY-MM-DD for both start and end."},
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
+                start_date = datetime.strptime(start_str, "%Y-%m-%d").replace(tzinfo=pytimezone.utc)
+                end_date = datetime.strptime(end_str, "%Y-%m-%d").replace(tzinfo=pytimezone.utc) + timedelta(days=1)
 
-            else:
+            # ---- DEFAULT AGG ----
+            if start_date and end_date:
+                agg = (
+                    Order.objects.filter(
+                        status="served",
+                        created_at__gte=start_date,
+                        created_at__lt=end_date,
+                    ).aggregate(
+                        total_sales=Sum("total", output_field=FloatField()),
+                        total_count=Count("id"),
+                    )
+                )
                 return Response(
-                    {"error": f"Invalid sales parameter '{sales_param}'."},
-                    status=status.HTTP_400_BAD_REQUEST,
+                    {
+                        "sales_type": sales_param,
+                        "range": {"start": start_date, "end": end_date},
+                        "served_sales_total": round(agg["total_sales"] or 0, 2),
+                        "served_orders_count": agg["total_count"] or 0,
+                    },
+                    status=status.HTTP_200_OK,
                 )
-
-            # --- Aggregate for daily/weekly/monthly/year/custom ---
-            agg = (
-                Order.objects.filter(
-                    status="served",
-                    created_at__gte=start_date,
-                    created_at__lt=end_date,
-                )
-                .aggregate(
-                    total_sales=Sum("total", output_field=FloatField()),
-                    total_count=Count("id"),
-                )
-            )
-
-            return Response(
-                {
-                    "sales_type": sales_param,
-                    "range": {"start": start_date, "end": end_date},
-                    "served_sales_total": round(agg["total_sales"] or 0, 2),
-                    "served_orders_count": agg["total_count"] or 0,
-                },
-                status=status.HTTP_200_OK,
-            )
 
         # ---------------------
-        # NORMAL ORDER LIST
+        # SHOW ALL
         # ---------------------
-        if show_all or date_param == "all":
-            queryset = queryset.order_by("-created_at")
+        if show_all or status_param == "all" or date_param == "all":
+            queryset = queryset.filter(is_active=True).order_by("-created_at")
             serializer = OrderSerializer(queryset, many=True)
             return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -893,7 +945,7 @@ class OrdersListAPIView(APIView):
         elif date_param == "week":
             start_of_week = today_local - timedelta(days=today_local.weekday())
             start_of_week_dt = datetime.combine(start_of_week, datetime.min.time(), tzinfo=pytimezone.utc)
-            queryset = queryset.filter(created_at__gte=start_of_week_dt)
+            queryset = queryset.filter(created_at__gte=start_of_week_dt, is_active=True)
             queryset = queryset.order_by("-created_at")
             serializer = OrderSerializer(queryset, many=True)
             return Response(serializer.data, status=status.HTTP_200_OK)
@@ -906,10 +958,9 @@ class OrdersListAPIView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        # Filter for the specific day
         start_of_day = datetime.combine(target_date, datetime.min.time(), tzinfo=pytimezone.utc)
         end_of_day = start_of_day + timedelta(days=1)
-        queryset = queryset.filter(created_at__gte=start_of_day, created_at__lt=end_of_day)
+        queryset = queryset.filter(created_at__gte=start_of_day, created_at__lt=end_of_day, is_active=True)
 
         # ---------------------
         # HOURLY GROUPING
@@ -940,10 +991,12 @@ class OrdersListAPIView(APIView):
 
             return Response(result, status=status.HTTP_200_OK)
 
-        # Default: return list of orders
-        queryset = queryset.order_by("-created_at")
+        # ---------------------
+        # DEFAULT RESPONSE
+        # ---------------------
+        queryset = queryset.filter(is_active=True).order_by("-created_at")
         serializer = OrderSerializer(queryset, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)  
+        return Response(serializer.data, status=status.HTTP_200_OK)
     
 class UpdateOrderStatusAPIView(APIView):
     def patch(self, request, order_id):
@@ -967,15 +1020,14 @@ class UpdateOrderStatusAPIView(APIView):
             {"message": f"Order {order.id} status updated to {new_status}"},
             status=status.HTTP_200_OK,
         )
+              
 class TableOrdersAPIView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request, table_id):
         try:
-            orders = Order.objects.filter(table__table_number=table_id).order_by('-created_at')
-
-            if not orders.exists():
-                return Response({"message": "No orders for this table"}, status=404)
+            # Fetch only active orders
+            orders = Order.objects.filter(table__table_number=table_id, is_active=True).order_by('-created_at')
 
             data = []
             for order in orders:
@@ -985,13 +1037,11 @@ class TableOrdersAPIView(APIView):
                 now = timezone.now()
                 remaining = expected_ready_time - now
                 minutes_left = max(int(remaining.total_seconds() // 60), 0)
-                time_remaining = (
-                    f"{minutes_left} minutes left" if minutes_left > 0 else "Ready"
-                )
+                time_remaining = f"{minutes_left} minutes left" if minutes_left > 0 else "Ready"
 
                 items = []
-                for item in OrderItem.objects.filter(order=order):
-                    if item.menu_item:  
+                for item in OrderItem.objects.filter(order=order, order__is_active=True):
+                    if item.menu_item and getattr(item, 'is_active', True):
                         items.append({
                             "type": "menu_item",
                             "name": item.menu_item.name,
@@ -1001,11 +1051,11 @@ class TableOrdersAPIView(APIView):
                             "preparation_time": getattr(item.menu_item, 'preparation_time', None),
                             "spice_level": getattr(item.menu_item, 'spice_level', None),
                         })
-                    elif item.custom_dish:  
+                    elif item.custom_dish and item.custom_dish.is_active:
                         items.append({
                             "type": "custom_dish",
                             "name": item.custom_dish.name,
-                            "image": item.custom_dish.image_url,  
+                            "image": item.custom_dish.image_url,
                             "ingredients": [
                                 {
                                     "name": di.ingredient.name,
@@ -1030,11 +1080,12 @@ class TableOrdersAPIView(APIView):
                     "items": items,
                 })
 
+            # Always return a list, even if empty
             return Response({"orders": data}, status=200)
 
         except Exception as e:
             return Response({"error": str(e)}, status=500)
-         
+            
 class OrderDetailAPIView(APIView):
     permission_classes = [permissions.AllowAny]
     def get(self, request, order_id):
@@ -1120,6 +1171,7 @@ class FeedbackAPIView(APIView):
 class WaiterRequestAPIView(APIView):
     """
     Customer creates a waiter request (e.g., need water, need bill, clean table, general)
+    and fetches active requests.
     """
     permission_classes = [permissions.AllowAny]
 
@@ -1135,15 +1187,62 @@ class WaiterRequestAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        description = request.data.get("description", "") if req_type == "general" else ""
+        description = request.data.get("description", "").strip() if req_type == "general" else ""
 
-        WaiterRequest.objects.create(table=table, type=req_type, description=description)
+        if req_type == "general" and not description:
+            return Response(
+                {"error": "Description is required for general requests."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        waiter_request = WaiterRequest.objects.create(
+            table=table,
+            type=req_type,
+            description=description,
+            is_active=True
+        )
 
         msg = f"Waiter request '{req_type}' sent for Table {table.table_number}"
         if req_type == "general" and description:
             msg += f": {description}"
 
-        return Response({"message": msg}, status=status.HTTP_201_CREATED)
+        return Response(
+            {
+                "message": msg,
+                "request": {
+                    "id": waiter_request.id,
+                    "table_number": waiter_request.table.table_number,
+                    "type": waiter_request.type,
+                    "description": waiter_request.description,
+                    "status": waiter_request.status,
+                    "is_active": waiter_request.is_active,
+                    "created_at": waiter_request.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            },
+            status=status.HTTP_201_CREATED
+        )
+
+    def get(self, request, table_id):
+        """
+        Returns only active waiter requests for a table.
+        """
+        table = get_object_or_404(Table, table_number=table_id)
+        active_requests = WaiterRequest.objects.filter(table=table, is_active=True)
+
+        serialized = [
+            {
+                "id": req.id,
+                "table_number": req.table.table_number,
+                "type": req.type,
+                "description": req.description,
+                "status": req.status,
+                "is_active": req.is_active,
+                "created_at": req.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            for req in active_requests
+        ]
+
+        return Response({"active_requests": serialized}, status=status.HTTP_200_OK)
 
 class WaiterRequestListAPIView(APIView):
     """
@@ -1169,8 +1268,8 @@ class WaiterRequestListAPIView(APIView):
 class ServiceRequestAPIView(APIView):
     """
     Fetch service (waiter) requests for both roles:
-    - Waiter → only today's requests
-    - Admin → all or date-filtered requests
+    - Waiter → only today's active requests
+    - Admin → all active or date-filtered active requests
     """
     permission_classes = [permissions.AllowAny]  # Change to IsAuthenticated if needed
 
@@ -1179,7 +1278,8 @@ class ServiceRequestAPIView(APIView):
         date_param = request.query_params.get("date", None)
         today = timezone.localdate()
 
-        queryset = WaiterRequest.objects.all()
+        # ✅ Fetch only active requests
+        queryset = WaiterRequest.objects.filter(is_active=True)
 
         # 🔹 Role-based filtering
         if user_role == "waiter":
@@ -1200,6 +1300,7 @@ class ServiceRequestAPIView(APIView):
             }
             for r in queryset
         ]
+
         return Response(data, status=status.HTTP_200_OK)
 
 class WaiterRequestUpdateAPIView(APIView):
@@ -1249,10 +1350,18 @@ class ChefCompletedOrdersAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        """
-        Return all orders completed by this chef
-        """
-        orders = Order.objects.filter(status="served", chef=request.user).order_by("-updated_at")
+        today = timezone.localdate()
+
+        orders = (
+            Order.objects
+            .filter(
+                status="served",
+                chef=request.user,
+                updated_at__date=today
+            )
+            .order_by("-updated_at")
+        )
+
         serializer = OrderSerializer(orders, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -1315,23 +1424,24 @@ class UpdateOrderStatusAPIView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 class MarkOrderServedAPIView(APIView):
-    permission_classes = [permissions.IsAuthenticated]  # only logged-in users
-
+    permission_classes = [permissions.IsAuthenticated]  
     def patch(self, request, order_id):
         try:
             order = get_object_or_404(Order, id=order_id)
             
-            # Assign waiter if not already assigned
             if order.waiter is None:
                 order.waiter = request.user
 
             order.status = "served"
             order.save()
 
-            # Increment the waiter's completed orders count
-            if hasattr(request.user, "orders_completed"):
-                request.user.orders_completed += 1
-                request.user.save()
+            if hasattr(order.waiter, "orders_completed"):
+                order.waiter.orders_completed += 1
+                order.waiter.save()
+
+            if hasattr(order.chef, "orders_completed"):
+                order.chef.orders_completed += 1
+                order.chef.save()
             
             served_by = getattr(request.user, "username", "Waiter")
             return Response(
@@ -1344,16 +1454,15 @@ class MarkOrderServedAPIView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+
 class TableListAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        # Get 'occupied' query parameter
         occupied = request.query_params.get('occupied', None)
 
         tables = Table.objects.all().order_by("table_number")
 
-        # If ?occupied=true, show only occupied tables
         if occupied is not None:
             if occupied.lower() == 'true':
                 tables = tables.filter(status='occupied')
@@ -1362,7 +1471,8 @@ class TableListAPIView(APIView):
 
         serializer = TableSerializer(tables, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
-    
+
+
 class WaiterRequestsByTableAPIView(APIView):
     """
     Returns all waiter requests for a specific table number.
@@ -1416,6 +1526,7 @@ def release_table(request, table_number):
             {"error": f"Table {table_number} not found"},
             status=status.HTTP_404_NOT_FOUND
         )
+        
 class BaseListView(APIView):
     permission_classes = [permissions.AllowAny]
 
@@ -1621,24 +1732,34 @@ class ClearTableDataAPIView(APIView):
 
     @transaction.atomic
     def post(self, request, table_number):
+        """
+        Clears a table: sets is_active=False for all related objects,
+        logs a snapshot in TableHistory, and sets table.status='available'.
+        """
+        table = get_object_or_404(Table, table_number=table_number)
+
         try:
-            table = Table.objects.get(table_number=table_number)
+            # Prepare snapshot data for history
             cart_data = [
                 {
-                    "item_name": item.menu_item.name if item.menu_item else item.custom_dish.name,
+                    "item_name": getattr(item.menu_item, 'name', None) or getattr(item.custom_dish, 'name', "Unknown"),
                     "quantity": item.quantity,
-                    "subtotal": float(item.subtotal),
+                    "subtotal": float(item.subtotal or 0),
                     "is_custom": item.custom_dish is not None
-                } for cart in Cart.objects.filter(table=table) for item in cart.items.all()
+                }
+                for cart in Cart.objects.filter(table=table, is_active=True)
+                for item in cart.items.filter(is_active=True)
             ]
 
             order_data = [
                 {
-                    "item_name": item.menu_item.name if item.menu_item else item.custom_dish.name,
+                    "item_name": getattr(item.menu_item, 'name', None) or getattr(item.custom_dish, 'name', "Unknown"),
                     "quantity": item.quantity,
-                    "subtotal": float(item.subtotal),
+                    "subtotal": float(item.subtotal or 0),
                     "is_custom": item.custom_dish is not None
-                } for order in Order.objects.filter(table=table) for item in order.items.all()
+                }
+                for order in Order.objects.filter(table=table, is_active=True)
+                for item in order.items.filter(is_active=True)
             ]
 
             request_data = [
@@ -1646,9 +1767,11 @@ class ClearTableDataAPIView(APIView):
                     "type": req.type,
                     "description": req.description,
                     "status": req.status
-                } for req in WaiterRequest.objects.filter(table=table)
+                }
+                for req in WaiterRequest.objects.filter(table=table, is_active=True)
             ]
 
+            # Save snapshot to TableHistory
             TableHistory.objects.create(
                 table=table,
                 status="available",
@@ -1660,25 +1783,27 @@ class ClearTableDataAPIView(APIView):
                 }
             )
 
-            Cart.objects.filter(table=table).delete()
-            Order.objects.filter(table=table).delete()
-            WaiterRequest.objects.filter(table=table).delete()
+            # Soft-disable all related records
+            Cart.objects.filter(table=table, is_active=True).update(is_active=False)
+            CartItem.objects.filter(cart__table=table, is_active=True).update(is_active=False)
+            Order.objects.filter(table=table, is_active=True).update(is_active=False)
+            OrderItem.objects.filter(order__table=table, is_active=True).update(is_active=False)
+            CustomDish.objects.filter(is_active=True, table=table).update(is_active=False)
+            WaiterRequest.objects.filter(table=table, is_active=True).update(is_active=False)
+
+            # Set table as available
             table.status = "available"
-            table.save()
+            table.save(update_fields=["status"])
 
             return Response(
-                {"message": f"Table {table.table_number} cleared and archived."},
+                {"message": f"Table {table.table_number} cleared and archived (soft-deleted)."},
                 status=status.HTTP_200_OK
             )
 
-        except Table.DoesNotExist:
-            return Response({"error": "Table not found"}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
-# ============================================================
-# Keywords & Off-topic Detection
-# ============================================================
+
+
 
 FOOD_KEYWORDS = [
     "food", "meal", "dish", "menu", "order", "recipe", "ingredient",
@@ -1697,9 +1822,6 @@ OFFTOPIC_PATTERNS = re.compile(
     re.IGNORECASE
 )
 
-# ============================================================
-# Helper Functions
-# ============================================================
 
 def is_offtopic(text: str) -> bool:
     return bool(OFFTOPIC_PATTERNS.search(text))
@@ -1768,9 +1890,6 @@ def find_relevant_items(question: str):
         return None
     return {"dishes": dishes, "ingredients": ingredients}
 
-# ============================================================
-# Chat API
-# ============================================================
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
@@ -1857,7 +1976,7 @@ def chat_with_gemini(request):
         
 class LeaderboardView(APIView):
     """
-    Returns a leaderboard of users based on completed orders.
+    Returns a leaderboard of users based on completed orders stored in the User model.
     Each order gives 20 points. Supports kitchen or waiter filter.
     """
     permission_classes = [permissions.IsAuthenticated]
@@ -1870,23 +1989,17 @@ class LeaderboardView(APIView):
             role_filter = "waiter"
 
         try:
-            # Filter users by role
             if role_filter:
                 users = User.objects.filter(role=role_filter, is_active=True)
             else:
                 users = User.objects.filter(role__in=["kitchen", "waiter"], is_active=True)
 
-            leaderboard = []
             POINTS_PER_ORDER = 20
+            leaderboard = []
 
             for user in users:
-                if user.role == "kitchen":
-                    orders_count = Order.objects.filter(chef=user, status="served").count()
-                elif user.role == "waiter":
-                    orders_count = Order.objects.filter(waiter=user, status="served").count()
-                else:
-                    orders_count = 0
-
+                orders_count = getattr(user, "orders_completed", 0)
+                
                 leaderboard.append({
                     "email": user.email,
                     "name": getattr(user, "name", ""),
@@ -1903,3 +2016,174 @@ class LeaderboardView(APIView):
                 {"error": f"Error fetching leaderboard: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+            
+            
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def export_completed_orders_pdf(request):
+    chef = request.user
+    today = datetime.now().date()
+
+    orders = (
+        Order.objects.filter(
+            status="served",
+            chef=chef,
+            updated_at__date=today
+        )
+        .prefetch_related("items")
+    )
+
+    response = HttpResponse(content_type="application/pdf")
+    response["Content-Disposition"] = "attachment; filename=completed_orders.pdf"
+
+    pdf = SimpleDocTemplate(
+        response,
+        pagesize=A4,
+        leftMargin=30,
+        rightMargin=30,
+        topMargin=40,
+        bottomMargin=30,
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "title",
+        parent=styles["Heading1"],
+        fontSize=20,
+        textColor=colors.HexColor("#059669"),
+        spaceAfter=12,
+    )
+    subtitle_style = ParagraphStyle(
+        "subtitle",
+        parent=styles["Normal"],
+        fontSize=12,
+        textColor=colors.grey,
+        spaceAfter=8,
+    )
+
+    elements = []
+
+    # Header
+    elements.append(Paragraph("Completed Orders Report", title_style))
+    elements.append(Paragraph(f"Chef: {chef}", subtitle_style))
+    elements.append(Paragraph(f"Date: {today}", subtitle_style))
+    elements.append(Spacer(1, 12))
+
+    # Table Heading
+    data = [["Table", "Items", "Total (₹)", "Completed Time"]]
+
+    # Add all orders
+    for order in orders:
+        total_items = order.items.aggregate(total=Sum("quantity"))["total"] or 0
+        data.append([
+            str(order.table.table_number),
+            str(total_items),
+            str(order.total),
+            order.updated_at.strftime("%I:%M %p"),
+        ])
+
+    # Table Styling
+    table = TablePDF(data, colWidths=[50, 60, 80, 100])
+    table.setStyle(
+        TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#059669")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 12),
+            ("BOTTOMPADDING", (0, 0), (-1, 0), 10),
+
+            ("BACKGROUND", (0, 1), (-1, -1), colors.whitesmoke),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+
+            ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+            ("FONTSIZE", (0, 1), (-1, -1), 11),
+        ])
+    )
+
+    elements.append(table)
+
+    pdf.build(elements)
+    return response
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def export_inventory_pdf(request):
+
+    items = MenuItem.objects.all().order_by("category", "name")
+
+    response = HttpResponse(content_type="application/pdf")
+    response["Content-Disposition"] = "attachment; filename=inventory_report.pdf"
+
+    pdf = SimpleDocTemplate(
+        response,
+        pagesize=A4,
+        leftMargin=30,
+        rightMargin=30,
+        topMargin=40,
+        bottomMargin=30,
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "title",
+        parent=styles["Heading1"],
+        fontSize=20,
+        textColor=colors.HexColor("#059669"),
+        spaceAfter=12,
+    )
+    subtitle_style = ParagraphStyle(
+        "subtitle",
+        parent=styles["Normal"],
+        fontSize=12,
+        textColor=colors.grey,
+        spaceAfter=8,
+    )
+
+    elements = []
+
+    elements.append(Paragraph("Inventory Report", title_style))
+    elements.append(Paragraph(f"Generated on: {datetime.now().strftime('%d %b %Y %I:%M %p')}", subtitle_style))
+    elements.append(Spacer(1, 14))
+
+    data = [["Name", "Category", "Stock", "Min Stock", "Price (₹)", "Status"]]
+
+    for item in items:
+        status = (
+            "Out of Stock" if item.stock == 0
+            else "Low Stock" if item.stock <= item.min_stock
+            else "In Stock"
+        )
+        data.append([
+            item.name,
+            item.category,
+            str(item.stock),
+            str(item.min_stock),
+            str(item.price),
+            status,
+        ])
+
+    # Table Style
+    table = TablePDF(data, colWidths=[100, 70, 40, 50, 60, 60])
+    table.setStyle(
+        TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#059669")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 12),
+            ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+
+            ("BACKGROUND", (0, 1), (-1, -1), colors.whitesmoke),
+            ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+            ("FONTSIZE", (0, 1), (-1, -1), 10),
+
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+            ("ALIGN", (2, 1), (-2, -1), "CENTER"),
+        ])
+    )
+
+    elements.append(table)
+
+    pdf.build(elements)
+    return response
+

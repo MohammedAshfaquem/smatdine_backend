@@ -3,7 +3,7 @@ from .views import (
     # --- Auth Views ---
     StaffRegisterView, StaffLoginView, VerifyStaffEmailView,
     RequestPasswordResetView, PasswordResetConfirmView, ValidateResetTokenView,
-    # --- Admin / Staff Management ---
+    # --- Admin / Staff Management --
     PendingUsersView, ApproveUserView, PendingRequestsCountView,
     StaffListView, StaffActionView,LeaderboardView,
     # --- Table Views ---
@@ -29,7 +29,7 @@ from .views import (
     
     
     
-    chat_with_gemini
+    chat_with_gemini,export_completed_orders_pdf,export_inventory_pdf
 )
 
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
@@ -131,4 +131,9 @@ urlpatterns = [
     
     
     path("api/chat/", chat_with_gemini, name="chat_with_gemini"),
+    path("export/completed-orders-pdf/", export_completed_orders_pdf, name="export_completed_orders_pdf"),
+    path("export/inventory-pdf/",export_inventory_pdf, name="export_inventory_pdf"),
+
+    
+
 ]

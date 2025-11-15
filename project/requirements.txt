@@ -26,7 +26,9 @@ django-cors-headers>=4.4.0      # Allow CORS for frontend API calls
 # 🚀 Web Server
 # ===============================
 gunicorn>=21.2.0                # Production WSGI server
+reportlab>=4.0.0
 
+openpyxl>=3.1.2
 # ===============================
 # 🖼️ Media, Images & QR
 # ===============================

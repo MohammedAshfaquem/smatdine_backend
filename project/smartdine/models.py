@@ -124,6 +124,7 @@ class Table(models.Model):
     def __str__(self):
         return f"Table {self.table_number}"
 
+
 class MenuItem(models.Model):
     CATEGORY_CHOICES = [
         ('starter', 'Starter'),
@@ -177,6 +178,7 @@ class Cart(models.Model):
     table = models.ForeignKey(Table, on_delete=models.CASCADE, related_name="cart")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(default=True)
 
     def __str__(self):
         return f"Cart for Table {self.table.table_number}"
@@ -193,6 +195,7 @@ class CartItem(models.Model):
     quantity = models.PositiveIntegerField(default=1)
     special_instructions = models.TextField(blank=True, null=True)
     is_custom = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
 
     def __str__(self):
         if self.is_custom and self.custom_dish:
@@ -238,6 +241,7 @@ class Order(models.Model):
         related_name="orders_as_waiter",
         limit_choices_to={'role': 'waiter'}  
     )
+    is_active = models.BooleanField(default=True)
 
     def __str__(self):
         return f"Order {self.id} - Table {self.table.table_number}"
@@ -262,6 +266,7 @@ class OrderItem(models.Model):
     quantity = models.PositiveIntegerField(default=1)
     price = models.DecimalField(max_digits=8, decimal_places=2)
     subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    is_active = models.BooleanField(default=True)
 
     def save(self, *args, **kwargs):
         """Auto-calculate subtotal and update parent order."""
@@ -297,6 +302,7 @@ class WaiterRequest(models.Model):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(default=True)
 
     def __str__(self):
         return f"{self.type} - Table {self.table.table_number}"
@@ -352,7 +358,8 @@ class CustomDish(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     sold_count = models.PositiveIntegerField(default=0)
     image_url = models.URLField(blank=True, null=True)
-    image_status = models.CharField(max_length=20, default="pending")  
+    image_status = models.CharField(max_length=20, default="pending") 
+    is_active = models.BooleanField(default=True) 
 
     def calculate_total(self):
         """Calculate total = base price + all ingredients"""

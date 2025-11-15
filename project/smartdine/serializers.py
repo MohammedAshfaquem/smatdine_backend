@@ -191,14 +191,14 @@ class CartSerializer(serializers.ModelSerializer):
         fields = ['id', 'table', 'items', 'total_amount', 'created_at', 'updated_at']
         
 class OrderItemSerializer(serializers.ModelSerializer):
-    menu_item = MenuItemSerializer(read_only=True)  # 🔹 Nested serializer for full menu details
+    menu_item = MenuItemSerializer(read_only=True)  
     custom_dish = CustomDishSerializer(read_only=True)
 
     class Meta:
         model = OrderItem
         fields = [
             "id",
-            "menu_item",       # now full object, not just ID
+            "menu_item",       
             "custom_dish",
             "quantity",
             "price",
@@ -244,7 +244,6 @@ class OrderSerializer(serializers.ModelSerializer):
     def get_table_number(self, obj):
         """Return table_number from related Table model"""
         return obj.table.table_number if obj.table else None
-
 
 class TableHistorySerializer(serializers.ModelSerializer):
     class Meta:
