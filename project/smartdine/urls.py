@@ -23,11 +23,8 @@ from .views import (
     # --- Custom Dish (AI / Builder Section) ---
     BaseListView, IngredientListView, CreateCustomDishView,
     CustomDishListByTableView, CustomDishListAllView, ReorderCustomDishView,
-    
-    
     ServiceRequestAPIView,
-    
-    
+    TableSessionAPIView,
     
     chat_with_gemini,export_completed_orders_pdf,export_inventory_pdf
 )
@@ -65,6 +62,7 @@ urlpatterns = [
     path('table/<int:table_number>/', table_redirect_view, name='table_redirect'),
     path('tables/<int:table_number>/', get_table, name='get_table'),
     path('api/tables/', TableListAPIView.as_view(), name='table-list'),
+    path("api/table/<int:table_number>/session/", TableSessionAPIView.as_view()),
     path('tables/<int:table_number>/occupy/', occupy_table, name='occupy-table'),
     path('tables/<int:table_number>/release/', release_table, name='release-table'),
 

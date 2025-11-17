@@ -14,12 +14,12 @@ from .models import (
     Base,
     CustomDish,
     CustomDishIngredient,
-    TableHistory
+    TableHistory,
+    ChatSession,
+    ChatMessage
 )
 
-# -------------------------
-# User Admin
-# -------------------------
+
 @admin.register(User)
 class UserAdmin(admin.ModelAdmin):
     list_display = (
@@ -34,9 +34,6 @@ class UserAdmin(admin.ModelAdmin):
     ordering = ("id",)
 
 
-# -------------------------
-# Menu Item Admin
-# -------------------------
 @admin.register(MenuItem)
 class MenuItemAdmin(admin.ModelAdmin):
     list_display = (
@@ -55,10 +52,6 @@ class MenuItemAdmin(admin.ModelAdmin):
     search_fields = ("name",)
     list_editable = ("price", "stock", "availability")
 
-
-# -------------------------
-# Cart & CartItem Admin
-# -------------------------
 class CartItemInline(admin.TabularInline):
     model = CartItem
     extra = 0
@@ -77,9 +70,6 @@ class CartItemAdmin(admin.ModelAdmin):
     readonly_fields = ("subtotal",)
 
 
-# -------------------------
-# Order & OrderItem Admin
-# -------------------------
 class OrderItemInline(admin.TabularInline):
     model = OrderItem
     extra = 0
@@ -114,19 +104,12 @@ class OrderItemAdmin(admin.ModelAdmin):
     readonly_fields = ("subtotal",)
 
 
-# -------------------------
-# WaiterRequest Admin
-# -------------------------
 @admin.register(WaiterRequest)
 class WaiterRequestAdmin(admin.ModelAdmin):
     list_display = ("id", "table", "type", "status", "created_at", "updated_at")
     list_filter = ("type", "status")
     search_fields = ("table__table_number", "description")
 
-
-# -------------------------
-# Table Admin
-# -------------------------
 @admin.register(Table)
 class TableAdmin(admin.ModelAdmin):
     list_display = ('id', 'table_number', 'seats', 'status', 'qr_code_preview', 'created_at', 'updated_at')
@@ -143,10 +126,6 @@ class TableAdmin(admin.ModelAdmin):
 
     qr_code_preview.short_description = "QR Code"
 
-
-# -------------------------
-# Feedback Admin
-# -------------------------
 @admin.register(Feedback)
 class FeedbackAdmin(admin.ModelAdmin):
     list_display = ('id', 'order', 'food_rating', 'service_rating', 'comments', 'created_at')
@@ -155,9 +134,6 @@ class FeedbackAdmin(admin.ModelAdmin):
     ordering = ('-created_at',)
 
 
-# -------------------------
-# Base & Ingredient Admin
-# -------------------------
 @admin.register(Base)
 class BaseAdmin(admin.ModelAdmin):
     list_display = ('name', 'price')
@@ -171,9 +147,6 @@ class IngredientAdmin(admin.ModelAdmin):
     search_fields = ('name',)
 
 
-# -------------------------
-# Custom Dish & Ingredients Admin
-# -------------------------
 class CustomDishIngredientInline(admin.TabularInline):
     model = CustomDishIngredient
     extra = 1
@@ -200,3 +173,7 @@ class TableHistoryAdmin(admin.ModelAdmin):
     readonly_fields = ("snapshot", "timestamp")
     search_fields = ("table__table_number",)
     list_filter = ("status", "timestamp")
+    
+    
+admin.site.register(ChatSession)
+admin.site.register(ChatMessage)

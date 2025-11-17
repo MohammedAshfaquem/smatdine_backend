@@ -11,7 +11,7 @@ services:
     volumes:
       - "C:/Users/Afi/Desktop/SmartDine/backend/project:/app"
     env_file:
-      - .env        # ✅ Loads all environment variables (including GEMINI_API_KEY)
+      - .env       
     environment:
       - PYTHONUNBUFFERED=1
       - UNSPLASH_ACCESS_KEY=${UNSPLASH_ACCESS_KEY}

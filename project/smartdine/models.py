@@ -89,6 +89,23 @@ class User(AbstractBaseUser, PermissionsMixin):
         self.password_reset_sent_at = None
         self.save(update_fields=["password_reset_token", "password_reset_sent_at"])
 
+class ChatSession(models.Model):
+    session_id = models.CharField(max_length=100, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    def __str__(self):
+        return self.session_id
+
+class ChatMessage(models.Model):
+    session = models.ForeignKey(ChatSession, on_delete=models.CASCADE, related_name="messages")
+    sender = models.CharField(max_length=10, choices=[("user", "user"), ("assistant", "assistant")])
+    text = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    def __str__(self):
+        return f"{self.sender} send message = {self.text}"
+    
+    
 class Table(models.Model):
     STATUS_CHOICES = [
         ('available', 'Available'),
@@ -102,25 +119,31 @@ class Table(models.Model):
     qr_code = models.ImageField(upload_to='qrcodes/', blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    session = models.ForeignKey(
+    ChatSession,
+    on_delete=models.SET_NULL,
+    null=True,
+    blank=True,
+    related_name="tables"
+)
+
 
     def save(self, *args, **kwargs):
-        """
-        Save the Table instance, then generate and attach a QR code image.
-        The QR will contain a link to the frontend customer dashboard.
-        """
+        is_new = self.pk is None
         super().save(*args, **kwargs)
 
-        frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:3001")
-        qr_data = f"{frontend_url}/customer/dashboard?table={self.table_number}"
+        if is_new:
+            frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:3001")
+            qr_data = f"{frontend_url}/customer/dashboard?table={self.table_number}"
 
-        qr_img = qrcode.make(qr_data)
-        buffer = BytesIO()
-        qr_img.save(buffer, format="PNG")
-        file_name = f"table_{self.table_number}_qr.png"
+            qr_img = qrcode.make(qr_data)
+            buffer = BytesIO()
+            qr_img.save(buffer, format="PNG")
+            file_name = f"table_{self.table_number}_qr.png"
 
-        self.qr_code.save(file_name, File(buffer), save=False)
-        super().save(update_fields=['qr_code'])
-
+            self.qr_code.save(file_name, File(buffer), save=False)
+            super().save(update_fields=['qr_code'])
+            
     def __str__(self):
         return f"Table {self.table_number}"
 
@@ -416,8 +439,7 @@ class CustomDishIngredient(models.Model):
 
     def __str__(self):
         return self.ingredient.name
-    
-    
+     
 class TableHistory(models.Model):
     table = models.ForeignKey("Table", on_delete=models.CASCADE, related_name="history")
     status = models.CharField(max_length=20, choices=[('available','Available'), ('occupied','Occupied')])
@@ -428,3 +450,4 @@ class TableHistory(models.Model):
 
     def __str__(self):
         return f"Table {self.table.table_number} cleared at {self.timestamp}"
+

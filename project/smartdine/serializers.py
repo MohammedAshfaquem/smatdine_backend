@@ -1,4 +1,3 @@
-# backend/project/smartdine/serializers.py
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.contrib.auth.hashers import make_password
@@ -86,11 +85,10 @@ class MenuItemSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = MenuItem
-        fields = "__all__"  # keeps all your existing fields
+        fields = "__all__" 
         read_only_fields = ["created_at", "updated_at", "is_low_stock"]
 
     def get_is_low_stock(self, obj):
-        # Return True if stock is less than or equal to min_stock
         return obj.stock <= getattr(obj, "min_stock", 0)
 
 class FeedbackSerializer(serializers.ModelSerializer):

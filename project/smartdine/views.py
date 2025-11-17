@@ -18,7 +18,7 @@ from django.views.decorators.csrf import csrf_exempt
 from .utils import send_verification_email,get_unsplash_image
 from .models import (Table,MenuItem,CartItem,Cart,OrderItem,Order,
                      Feedback,WaiterRequest,Base,CustomDish,
-                     CustomDishIngredient,Ingredient,TableHistory)
+                     CustomDishIngredient,Ingredient,TableHistory,ChatMessage,ChatSession)
 from django.conf import settings
 from django.db.models import Sum, FloatField, Count,F,Q
 from datetime import timedelta
@@ -39,7 +39,6 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Table as TablePDF, 
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.units import mm
-
 
 
 
@@ -112,11 +111,9 @@ class PasswordResetConfirmView(APIView):
 
         user = get_object_or_404(User, id=user_id)
 
-        # ✅ Check if token is valid first
         if not user.is_reset_token_valid(token):
             return Response({"error": "Invalid or expired token."}, status=400)
 
-        # ✅ Reset password and clear token (so link can’t be reused)
         user.set_password(password)
         user.clear_reset_token()
         user.save()
@@ -136,7 +133,6 @@ class RequestPasswordResetView(APIView):
         except User.DoesNotExist:
             return Response({"error": "User does not exist."}, status=404)
 
-        # ✅ Clear any existing token before creating a new one
         user.clear_reset_token()
 
         token = user.create_reset_token()
@@ -584,8 +580,7 @@ class CartAPIView(APIView):
 
         cart.items.all().delete()
         return Response({"message": "Cart cleared"}, status=status.HTTP_204_NO_CONTENT)
-
-    
+ 
 class CartCountView(APIView):   
     permission_classes = [permissions.AllowAny]
 
@@ -741,9 +736,14 @@ class OrderAPIView(APIView):
             status=status.HTTP_201_CREATED,
         )
    
-
 from datetime import datetime
 
+class TableSessionAPIView(APIView):
+    permission_classes = [permissions.AllowAny]
+    
+    def get(self, request, table_number):
+        table = get_object_or_404(Table, table_number=table_number)
+        return Response({"session_id": table.session_id})
 
 class OrdersListAPIView(APIView):
     """
@@ -765,10 +765,6 @@ class OrdersListAPIView(APIView):
             .select_related("table")
             .prefetch_related("items__menu_item")
         )
-
-        # ---------------------
-        # STATUS FILTER
-        # ---------------------
         if status_param and status_param != "all":
             valid_statuses = ["pending", "preparing", "ready", "served"]
             if status_param in valid_statuses:
@@ -781,18 +777,14 @@ class OrdersListAPIView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        # ---------------------
-        # SALES ANALYTICS
-        # ---------------------
+
         if sales_param:
             now_local = timezone.localtime()
             today_local = now_local.date()
 
-            # Initialize start/end date
             start_date = None
             end_date = None
 
-            # ---- TOP ITEMS ----
             if sales_param == "top_items":
                 top_items = (
                     OrderItem.objects.filter(order__status="served")
@@ -808,18 +800,15 @@ class OrdersListAPIView(APIView):
                     status=status.HTTP_200_OK,
                 )
 
-            # ---- TODAY ----
             elif sales_param == "today":
                 start_date = datetime.combine(today_local, datetime.min.time(), tzinfo=pytimezone.utc)
                 end_date = start_date + timedelta(days=1)
 
-            # ---- WEEK ----
             elif sales_param == "week":
                 start_of_week = today_local - timedelta(days=today_local.weekday())
                 start_date = datetime.combine(start_of_week, datetime.min.time(), tzinfo=pytimezone.utc)
                 end_date = start_date + timedelta(days=7)
 
-                # Daily revenue data for chart
                 daily_data = []
                 for i in range(7):
                     day_start = start_date + timedelta(days=i)
@@ -835,7 +824,7 @@ class OrdersListAPIView(APIView):
                         or 0
                     )
                     daily_data.append({
-                        "date": day_start.strftime("%a"),  # e.g., Mon, Tue
+                        "date": day_start.strftime("%a"), 
                         "total_sales": round(total, 2),
                     })
 
@@ -859,7 +848,6 @@ class OrdersListAPIView(APIView):
                     status=status.HTTP_200_OK,
                 )
 
-            # ---- MONTH ----
             elif sales_param == "month":
                 start_date = datetime.combine(today_local.replace(day=1), datetime.min.time(), tzinfo=pytimezone.utc)
                 if today_local.month == 12:
@@ -867,13 +855,11 @@ class OrdersListAPIView(APIView):
                 else:
                     end_date = datetime(today_local.year, today_local.month + 1, 1, tzinfo=pytimezone.utc)
 
-            # ---- YEAR ----
             elif sales_param == "year":
                 year = int(year_param) if year_param else today_local.year
                 start_date = datetime(year, 1, 1, tzinfo=pytimezone.utc)
                 end_date = datetime(year + 1, 1, 1, tzinfo=pytimezone.utc)
 
-            # ---- TOTAL ----
             elif sales_param == "total":
                 agg = (
                     Order.objects.filter(status="served")
@@ -891,7 +877,6 @@ class OrdersListAPIView(APIView):
                     status=status.HTTP_200_OK,
                 )
 
-            # ---- CUSTOM ----
             elif sales_param == "custom":
                 start_str = request.query_params.get("start")
                 end_str = request.query_params.get("end")
@@ -903,7 +888,6 @@ class OrdersListAPIView(APIView):
                 start_date = datetime.strptime(start_str, "%Y-%m-%d").replace(tzinfo=pytimezone.utc)
                 end_date = datetime.strptime(end_str, "%Y-%m-%d").replace(tzinfo=pytimezone.utc) + timedelta(days=1)
 
-            # ---- DEFAULT AGG ----
             if start_date and end_date:
                 agg = (
                     Order.objects.filter(
@@ -924,18 +908,11 @@ class OrdersListAPIView(APIView):
                     },
                     status=status.HTTP_200_OK,
                 )
-
-        # ---------------------
-        # SHOW ALL
-        # ---------------------
         if show_all or status_param == "all" or date_param == "all":
             queryset = queryset.filter(is_active=True).order_by("-created_at")
             serializer = OrderSerializer(queryset, many=True)
             return Response(serializer.data, status=status.HTTP_200_OK)
 
-        # ---------------------
-        # DATE FILTERING
-        # ---------------------
         now_local = timezone.localtime()
         today_local = now_local.date()
         tz_local = timezone.get_current_timezone()
@@ -962,9 +939,6 @@ class OrdersListAPIView(APIView):
         end_of_day = start_of_day + timedelta(days=1)
         queryset = queryset.filter(created_at__gte=start_of_day, created_at__lt=end_of_day, is_active=True)
 
-        # ---------------------
-        # HOURLY GROUPING
-        # ---------------------
         if group_by == "hourly":
             slots = [(9, 11), (11, 13), (13, 15), (15, 17), (17, 19)]
             result = []
@@ -991,9 +965,6 @@ class OrdersListAPIView(APIView):
 
             return Response(result, status=status.HTTP_200_OK)
 
-        # ---------------------
-        # DEFAULT RESPONSE
-        # ---------------------
         queryset = queryset.filter(is_active=True).order_by("-created_at")
         serializer = OrderSerializer(queryset, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
@@ -1271,20 +1242,18 @@ class ServiceRequestAPIView(APIView):
     - Waiter → only today's active requests
     - Admin → all active or date-filtered active requests
     """
-    permission_classes = [permissions.AllowAny]  # Change to IsAuthenticated if needed
+    permission_classes = [permissions.AllowAny]  
 
     def get(self, request):
-        user_role = request.query_params.get("role", "waiter")  # ?role=admin or waiter
+        user_role = request.query_params.get("role", "waiter")
         date_param = request.query_params.get("date", None)
         today = timezone.localdate()
 
-        # ✅ Fetch only active requests
         queryset = WaiterRequest.objects.filter(is_active=True)
 
-        # 🔹 Role-based filtering
         if user_role == "waiter":
             queryset = queryset.filter(created_at__date=today)
-        elif date_param:  # Admin filter by specific date if provided
+        elif date_param: 
             queryset = queryset.filter(created_at__date=date_param)
 
         queryset = queryset.order_by("-created_at")
@@ -1571,7 +1540,6 @@ class CreateCustomDishView(APIView):
             print("Base lookup failed:", e)
             raise
 
-        # Create CustomDish
         custom_dish = CustomDish.objects.create(
             name=name,
             base=base,
@@ -1583,7 +1551,6 @@ class CreateCustomDishView(APIView):
         total_price = Decimal(base.price or 0)
         total_time = getattr(base, "preparation_time", 0)
 
-        # Add ingredients
         for item in ingredients_payload:
             ing_id = item.get("ingredient_id")
             qty = max(int(item.get("quantity", 1)), 1)
@@ -1604,12 +1571,10 @@ class CreateCustomDishView(APIView):
             total_price += Decimal(ingredient.price) * qty
             total_time += getattr(ingredient, "preparation_time", 0) * qty
 
-        # Save totals
         custom_dish.total_price = total_price
         custom_dish.preparation_time = total_time
         custom_dish.save()
 
-        # Generate Unsplash image
         try:
             image_url = get_unsplash_image(custom_dish)
             if image_url:
@@ -1624,7 +1589,6 @@ class CreateCustomDishView(APIView):
             custom_dish.image_status = "failed"
             custom_dish.save(update_fields=["image_status"])
 
-        # Optionally add to cart
         if add_to_cart:
             cart, _ = Cart.objects.get_or_create(table=table)
             CartItem.objects.create(
@@ -1732,14 +1696,9 @@ class ClearTableDataAPIView(APIView):
 
     @transaction.atomic
     def post(self, request, table_number):
-        """
-        Clears a table: sets is_active=False for all related objects,
-        logs a snapshot in TableHistory, and sets table.status='available'.
-        """
         table = get_object_or_404(Table, table_number=table_number)
 
         try:
-            # Prepare snapshot data for history
             cart_data = [
                 {
                     "item_name": getattr(item.menu_item, 'name', None) or getattr(item.custom_dish, 'name', "Unknown"),
@@ -1771,7 +1730,7 @@ class ClearTableDataAPIView(APIView):
                 for req in WaiterRequest.objects.filter(table=table, is_active=True)
             ]
 
-            # Save snapshot to TableHistory
+            # Save snapshot
             TableHistory.objects.create(
                 table=table,
                 status="available",
@@ -1783,15 +1742,20 @@ class ClearTableDataAPIView(APIView):
                 }
             )
 
-            # Soft-disable all related records
+            # Soft-disable data
             Cart.objects.filter(table=table, is_active=True).update(is_active=False)
             CartItem.objects.filter(cart__table=table, is_active=True).update(is_active=False)
             Order.objects.filter(table=table, is_active=True).update(is_active=False)
             OrderItem.objects.filter(order__table=table, is_active=True).update(is_active=False)
             CustomDish.objects.filter(is_active=True, table=table).update(is_active=False)
             WaiterRequest.objects.filter(table=table, is_active=True).update(is_active=False)
+            
 
-            # Set table as available
+            # --- Clear SmartDine AI chat session ---
+            session_id = f"TABLE_{table.table_number}"
+            ChatSession.objects.filter(session_id=session_id).delete()
+
+            # Mark table as available
             table.status = "available"
             table.save(update_fields=["status"])
 
@@ -1802,7 +1766,6 @@ class ClearTableDataAPIView(APIView):
 
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
 
 
 FOOD_KEYWORDS = [
@@ -1834,7 +1797,6 @@ def looks_food_related(text: str) -> bool:
     text_l = text.lower()
     words = re.findall(r"\b\w+\b", text_l)
 
-    # Direct food keyword match
     for kw in FOOD_KEYWORDS:
         if kw in text_l:
             return True
@@ -1853,7 +1815,6 @@ def cleanup_response(resp_text: str) -> str:
     if is_offtopic(resp_text):
         return "I can only help with food, health, nutrition, and restaurant menu questions."
 
-    # Remove unnecessary symbols but preserve dashes for ranges
     text = re.sub(r"[*_#>`~]+", "", resp_text)
     text = re.sub(r"\s{2,}", " ", text).strip()
 
@@ -1890,80 +1851,80 @@ def find_relevant_items(question: str):
         return None
     return {"dishes": dishes, "ingredients": ingredients}
 
-
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def chat_with_gemini(request):
-    """SmartDine AI Chat Assistant with context-aware responses."""
-    question = (request.data.get("message") or "").strip()
-    if not question:
+    message = (request.data.get("message") or "").strip()
+    session_id = request.data.get("session_id")
+    if not session_id:
+        return Response({"error": "Missing session_id"}, status=400)
+    if not message:
         return Response({"error": "Empty message"}, status=400)
 
-    # Friendly greeting
-    if is_greeting(question):
-        return Response({
-            "reply": "Hi there! 👋 I’m SmartDine, your restaurant assistant. "
-                     "How can I help you today — ordering, menu suggestions, or meal details?"
-        })
+    # Load or create session
+    session, _ = ChatSession.objects.get_or_create(session_id=session_id)
 
-    # Block off-topic questions
-    if is_offtopic(question):
-        return Response({
-            "reply": "I can only assist with SmartDine restaurant orders, food, or nutrition-related questions."
-        })
+    # Greeting only if VERY first user message
+    is_first_message = (session.messages.count() == 0)
 
-    # Load Gemini API key
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        return Response({"error": "Gemini API key not set"}, status=500)
+    # Save user message immediately
+    ChatMessage.objects.create(session=session, sender="user", text=message)
 
-    # Fetch relevant menu items or ingredients (RAG)
-    context_data = find_relevant_items(question)
-    base_context = ""
-    custom_available = True
+    # Off-topic check
+    if is_offtopic(message):
+        reply_text = "I can help only with SmartDine restaurant menu, food, nutrition, or ordering."
+        ChatMessage.objects.create(session=session, sender="assistant", text=reply_text)
+        return Response({"reply": reply_text})
+
+    # RAG lookup
+    context_data = find_relevant_items(message)
+    rag_context = ""
     if context_data:
-        dishes = context_data.get("dishes", [])
-        ingredients = context_data.get("ingredients", [])
-        if not dishes:
-            dishes_text = "No matching dishes available."
-            custom_available = True
-        else:
-            dishes_text = ", ".join(dishes)
-        if not ingredients:
-            ingredients_text = "No ingredients available."
-        else:
-            ingredients_text = ", ".join(ingredients)
-        base_context = f"Related dishes: {dishes_text}. Suggested ingredients: {ingredients_text}."
-    else:
-        base_context = "No menu items found for your request. You can try a custom dish."
-
-    # Restaurant service info
-    restaurant_context = (
-        "Each order takes around 15–25 minutes to prepare depending on size. "
-        "Pricing depends on quantity, and our waiters will serve your table as soon as it's ready. "
-        "All service is handled by SmartDine restaurant staff."
-    )
-
-    try:
-        # Configure Gemini
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-2.0-flash")
-
-        prompt = (
-            f"You are SmartDine's restaurant assistant. "
-            f"Always greet politely and appreciate the customer. "
-            f"Answer only about food, menus, or restaurant orders. "
-            f"Keep answers short, natural, and human — under 100 words.\n\n"
-            f"{base_context}\n\n{restaurant_context}\n\n"
-            f"Customer: {question}"
+        rag_context = (
+            f"Related dishes: {', '.join(context_data.get('dishes', [])) or 'None'}.\n"
+            f"Relevant ingredients: {', '.join(context_data.get('ingredients', [])) or 'None'}.\n"
         )
 
-        response = model.generate_content(prompt)
+    # Fetch last N messages for memory
+    history = list(
+        session.messages.order_by("created_at")
+        .values("sender", "text")
+    )
+
+    # Build conversation prompt
+    conversation_txt = ""
+    for msg in history:
+        role = "Customer" if msg["sender"] == "user" else "Assistant"
+        conversation_txt += f"{role}: {msg['text']}\n"
+
+    # System instructions
+    system_prompt = (
+        "You are SmartDine AI, a restaurant assistant. "
+        "You answer ONLY food, menu, nutrition, and restaurant-related questions. "
+        "Keep responses concise, specific, and under 100 words. "
+        "Never restart the conversation or greet repeatedly. "
+        "Maintain context from the conversation history. "
+        "If the customer refers to something previously mentioned, interpret it correctly.\n\n"
+        f"{rag_context}"
+    )
+
+    if is_first_message:
+        system_prompt += (
+            "Start with a brief welcome on the first message only.\n"
+        )
+
+    # Build final prompt
+    final_prompt = system_prompt + "\nConversation:\n" + conversation_txt
+
+    # Gemini call
+    try:
+        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        response = model.generate_content(final_prompt)
         reply = cleanup_response(response.text)
 
-        # Add custom dish suggestion if no menu item
-        if not context_data or not context_data.get("dishes"):
-            reply += " You can also request a custom dish, and our chefs will prepare it for you!"
+        # Save assistant message
+        ChatMessage.objects.create(session=session, sender="assistant", text=reply)
 
         return Response({"reply": reply})
 
@@ -1971,8 +1932,7 @@ def chat_with_gemini(request):
         return Response({
             "error": "Gemini API request failed",
             "details": str(e)
-        }, status=502)
-        
+        }, status=502)   
         
 class LeaderboardView(APIView):
     """
@@ -2016,8 +1976,7 @@ class LeaderboardView(APIView):
                 {"error": f"Error fetching leaderboard: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-            
-            
+                      
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def export_completed_orders_pdf(request):
@@ -2163,7 +2122,6 @@ def export_inventory_pdf(request):
             status,
         ])
 
-    # Table Style
     table = TablePDF(data, colWidths=[100, 70, 40, 50, 60, 60])
     table.setStyle(
         TableStyle([
